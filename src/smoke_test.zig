@@ -272,3 +272,37 @@ test "batch norm rolling statistics follow darknet's 0.99 EMA" {
     // ~13% low, which inflates activations by ~7% per batch-normalised layer.
     try std.testing.expect(expected_fraction > 0.86 and expected_fraction < 0.88);
 }
+
+test "flat-index decomposition covers every output element exactly once" {
+    // This mirrors the index arithmetic in add_bias_kernel and
+    // scale_bias_kernel (src/kernels/darknet_kernels.hip), which map a flat
+    // thread id onto an NCHW buffer. Dropping the final `index /= n` -- as
+    // this port did until the first run on real hardware -- turns the write
+    // offset into j*(n+1)*size + i, which for tiny.cfg's first layer lands
+    // about 13 million floats past the end of an 800k-float buffer. The GPU
+    // reports that as "an illegal memory access", at whichever memcpy comes
+    // next rather than at the kernel responsible.
+    //
+    // A GPU is not needed to check the arithmetic, only to check the kernel;
+    // `darknet-zig gputest` still does the latter. The invariant here is that
+    // the mapping is a bijection onto [0, batch*n*size).
+    const batch = 3;
+    const n = 5;
+    const size = 7;
+    const total = batch * n * size;
+
+    var seen = [_]u8{0} ** total;
+    for (0..total) |flat| {
+        var index = flat;
+        const i = index % size;
+        index /= size;
+        const j = index % n;
+        index /= n;
+        const b = index;
+
+        const out = (b * n + j) * size + i;
+        try std.testing.expect(out < total);
+        seen[out] += 1;
+    }
+    for (seen) |count| try std.testing.expectEqual(@as(u8, 1), count);
+}

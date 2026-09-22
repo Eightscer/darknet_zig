@@ -23,10 +23,13 @@ $ darknet-zig  classifier predict cfg/imagenet1k.data cfg/tiny.cfg tiny.weights 
 The CPU path is verified end to end: it trains, the loss falls, checkpoints
 round-trip through darknet, and it reproduces upstream's inference numerically.
 
-**The HIP path has never run on a GPU.** It was developed on a machine with no
-AMD card. The kernels compile with `hipcc` and the host code compiles and links
-against `libamdhip64`, but no kernel has executed. Before trusting a training
-run, see [Verifying the GPU backend](#verifying-the-gpu-backend).
+**The HIP path is newly exercised and not yet trusted.** It was developed on a
+machine with no AMD card. The first real run found a genuine kernel bug (a
+dropped divide in `add_bias_kernel`/`scale_bias_kernel`, since fixed) and there
+may be more. **Run `darknet-zig gputest -gpu 0` before anything else** -- it
+compares every op against its CPU twin and would have caught that one in
+seconds, whereas going straight to `predict` produced an illegal memory access
+blamed on an unrelated memcpy.
 
 ## Building
 
@@ -212,6 +215,12 @@ maxpool forward              ok    max abs diff ...  max rel ...
 ```
 
 It exits non-zero if any check fails.
+
+`gputest` synchronises after every launch, so a kernel that walks off its
+buffer is named directly instead of surfacing as an "illegal memory access" at
+the next memcpy. Outside `gputest` that costs a stall per launch, so it is off
+by default; set `DARKNET_HIP_SYNC=1` to turn it on for a training or prediction
+run you are debugging.
 
 Anything above single-precision rounding error means a kernel and its host twin
 have diverged. Run this first. After it passes, the next check is to train the

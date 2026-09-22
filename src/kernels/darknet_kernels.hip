@@ -184,7 +184,9 @@ extern "C" __global__ void add_bias_kernel(float *output, const float *biases, i
     int i = index % size;
     index /= size;
     int j = index % n;
-    output[(index * n + j) * size + i] += biases[j];
+    index /= n;
+    const int b = index;
+    output[(b * n + j) * size + i] += biases[j];
 }
 
 extern "C" __global__ void scale_bias_kernel(float *output, const float *scales, int batch, int n, int size) {
@@ -193,7 +195,9 @@ extern "C" __global__ void scale_bias_kernel(float *output, const float *scales,
     int i = index % size;
     index /= size;
     int j = index % n;
-    output[(index * n + j) * size + i] *= scales[j];
+    index /= n;
+    const int b = index;
+    output[(b * n + j) * size + i] *= scales[j];
 }
 
 // One block per filter; each block reduces over (batch x spatial).

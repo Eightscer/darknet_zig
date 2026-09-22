@@ -56,6 +56,13 @@ pub fn run(allocator: std.mem.Allocator) !void {
         return error.GpuRequired;
     }
 
+    // Synchronise after every launch for the duration of the test. A kernel
+    // that walks off its buffer otherwise reports the fault at whatever
+    // memcpy happens next, naming the wrong op; here the whole point is to
+    // name the right one, and the stalls do not matter at this size.
+    gpu.setSyncAfterLaunch(true);
+    defer gpu.setSyncAfterLaunch(false);
+
     var rng = utils.Rng.init(20240921);
     sys.print("\nComparing CPU and HIP implementations (tolerance {e}):\n\n", .{tolerance});
 

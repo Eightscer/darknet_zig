@@ -59,53 +59,74 @@ pub fn active() bool {
 var module: hip.Module = null;
 var kernels: Kernels = undefined;
 
+/// A looked-up device function plus its symbol name. The name exists purely
+/// so a fault can say which kernel it came from: GPU faults surface at the
+/// next synchronising call, which is usually a `hipMemcpy` far away from the
+/// kernel that actually misbehaved.
+pub const Kernel = struct {
+    f: hip.Function = null,
+    name: []const u8 = "",
+};
+
+/// When set (via DARKNET_HIP_SYNC=1) every launch is followed by a device
+/// synchronise and an error check, so a fault is reported against the kernel
+/// that caused it instead of the next memcpy. Costs a full pipeline stall per
+/// launch, so it is strictly a debugging aid.
+var sync_after_launch: bool = false;
+
+/// Force per-launch synchronisation on or off at runtime. `gputest` turns it
+/// on so a faulting kernel is named rather than blamed on the next memcpy.
+pub fn setSyncAfterLaunch(on: bool) void {
+    sync_after_launch = on;
+}
+
 /// One field per `extern "C" __global__` function in the .hip file. The field
 /// name is the symbol name, so registration is a comptime loop rather than 36
 /// hand-written lookups.
 const Kernels = struct {
-    activate_array_kernel: hip.Function = null,
-    gradient_array_kernel: hip.Function = null,
+    activate_array_kernel: Kernel = .{},
+    gradient_array_kernel: Kernel = .{},
 
-    fill_kernel: hip.Function = null,
-    copy_kernel: hip.Function = null,
-    axpy_kernel: hip.Function = null,
-    scal_kernel: hip.Function = null,
-    mul_kernel: hip.Function = null,
-    add_scalar_kernel: hip.Function = null,
-    constrain_kernel: hip.Function = null,
-    rand_uniform_kernel: hip.Function = null,
+    fill_kernel: Kernel = .{},
+    copy_kernel: Kernel = .{},
+    axpy_kernel: Kernel = .{},
+    scal_kernel: Kernel = .{},
+    mul_kernel: Kernel = .{},
+    add_scalar_kernel: Kernel = .{},
+    constrain_kernel: Kernel = .{},
+    rand_uniform_kernel: Kernel = .{},
 
-    add_bias_kernel: hip.Function = null,
-    scale_bias_kernel: hip.Function = null,
-    backward_bias_kernel: hip.Function = null,
-    backward_bias_conn_kernel: hip.Function = null,
-    backward_scale_kernel: hip.Function = null,
+    add_bias_kernel: Kernel = .{},
+    scale_bias_kernel: Kernel = .{},
+    backward_bias_kernel: Kernel = .{},
+    backward_bias_conn_kernel: Kernel = .{},
+    backward_scale_kernel: Kernel = .{},
 
-    fast_mean_kernel: hip.Function = null,
-    fast_variance_kernel: hip.Function = null,
-    normalize_kernel: hip.Function = null,
-    fast_mean_delta_kernel: hip.Function = null,
-    fast_variance_delta_kernel: hip.Function = null,
-    normalize_delta_kernel: hip.Function = null,
+    fast_mean_kernel: Kernel = .{},
+    fast_variance_kernel: Kernel = .{},
+    normalize_kernel: Kernel = .{},
+    fast_mean_delta_kernel: Kernel = .{},
+    fast_variance_delta_kernel: Kernel = .{},
+    normalize_delta_kernel: Kernel = .{},
 
-    softmax_kernel: hip.Function = null,
-    softmax_x_ent_kernel: hip.Function = null,
-    l2_kernel: hip.Function = null,
-    l1_kernel: hip.Function = null,
-    smooth_l1_kernel: hip.Function = null,
+    softmax_kernel: Kernel = .{},
+    softmax_x_ent_kernel: Kernel = .{},
+    l2_kernel: Kernel = .{},
+    l1_kernel: Kernel = .{},
+    smooth_l1_kernel: Kernel = .{},
 
-    im2col_kernel: hip.Function = null,
-    col2im_kernel: hip.Function = null,
+    im2col_kernel: Kernel = .{},
+    col2im_kernel: Kernel = .{},
 
-    forward_maxpool_kernel: hip.Function = null,
-    backward_maxpool_kernel: hip.Function = null,
-    forward_avgpool_kernel: hip.Function = null,
-    backward_avgpool_kernel: hip.Function = null,
+    forward_maxpool_kernel: Kernel = .{},
+    backward_maxpool_kernel: Kernel = .{},
+    forward_avgpool_kernel: Kernel = .{},
+    backward_avgpool_kernel: Kernel = .{},
 
-    dropout_kernel: hip.Function = null,
-    shortcut_kernel: hip.Function = null,
-    adam_kernel: hip.Function = null,
-    gemm_kernel: hip.Function = null,
+    dropout_kernel: Kernel = .{},
+    shortcut_kernel: Kernel = .{},
+    adam_kernel: Kernel = .{},
+    gemm_kernel: Kernel = .{},
 };
 
 /// Locate darknet_kernels.hsaco. The build installs it next to the executable;
@@ -168,7 +189,14 @@ pub fn init(allocator: std.mem.Allocator, index: i32) !void {
     inline for (@typeInfo(Kernels).@"struct".fields) |f| {
         var fun: hip.Function = null;
         try hip.check(hip.hipModuleGetFunction(&fun, module, f.name ++ ""), "hipModuleGetFunction " ++ f.name);
-        @field(kernels, f.name) = fun;
+        @field(kernels, f.name) = .{ .f = fun, .name = f.name };
+    }
+
+    if (std.c.getenv("DARKNET_HIP_SYNC")) |v| {
+        sync_after_launch = std.mem.sliceTo(v, 0).len > 0 and v[0] != '0';
+        if (sync_after_launch) {
+            std.debug.print("DARKNET_HIP_SYNC set: synchronising and checking after every kernel launch.\n", .{});
+        }
     }
 
     device_index = index;
@@ -263,7 +291,7 @@ fn grid(n: usize) u32 {
 /// `args` is a tuple; each element is copied into a local so it has an address
 /// that outlives the call.
 fn launchDims(
-    func: hip.Function,
+    k: Kernel,
     gx: u32,
     gy: u32,
     bx: u32,
@@ -277,19 +305,41 @@ fn launchDims(
     inline for (fields, 0..) |f, i| {
         params[i] = @ptrCast(&@field(local, f.name));
     }
-    hip.must(hip.hipModuleLaunchKernel(func, gx, gy, 1, bx, by, 1, 0, null, &params, null), "hipModuleLaunchKernel");
+
+    const launch_err = hip.hipModuleLaunchKernel(k.f, gx, gy, 1, bx, by, 1, 0, null, &params, null);
+    if (launch_err != hip.success) {
+        std.debug.panic(
+            "HIP: launching {s} <<<({d},{d}),({d},{d})>>> failed: {s}",
+            .{ k.name, gx, gy, bx, by, hip.hipGetErrorString(launch_err) },
+        );
+    }
+
+    // A launch is asynchronous, so a bad memory access inside the kernel is
+    // not reported here -- it surfaces at the next synchronising call, which
+    // is typically a memcpy several layers later and tells you nothing about
+    // the cause. Under DARKNET_HIP_SYNC we pay for a stall to get the blame
+    // attached to the right kernel.
+    if (sync_after_launch) {
+        const err = hip.hipDeviceSynchronize();
+        if (err != hip.success) {
+            std.debug.panic(
+                "HIP: {s} <<<({d},{d}),({d},{d})>>> faulted: {s}",
+                .{ k.name, gx, gy, bx, by, hip.hipGetErrorString(err) },
+            );
+        }
+    }
 }
 
-fn launch1d(func: hip.Function, n: usize, args: anytype) void {
+fn launch1d(k: Kernel, n: usize, args: anytype) void {
     if (n == 0) return;
-    launchDims(func, grid(n), 1, block_size, 1, args);
+    launchDims(k, grid(n), 1, block_size, 1, args);
 }
 
 /// For the per-filter reduction kernels: one block per filter, BLOCK threads
 /// cooperating inside it.
-fn launchPerFilter(func: hip.Function, filters: usize, args: anytype) void {
+fn launchPerFilter(k: Kernel, filters: usize, args: anytype) void {
     if (filters == 0) return;
-    launchDims(func, @intCast(filters), 1, block_size, 1, args);
+    launchDims(k, @intCast(filters), 1, block_size, 1, args);
 }
 
 // ---------------------------------------------------------------------------
