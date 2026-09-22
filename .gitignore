@@ -1,0 +1,6 @@
+zig-out/
+.zig-cache/
+backup/
+*.weights
+*.backup
+*.hsaco
