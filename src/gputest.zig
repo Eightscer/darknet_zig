@@ -1,13 +1,18 @@
 //! CPU-vs-GPU consistency check.
 //!
-//! This project was written on a machine with no AMD card in it, so every HIP
-//! kernel is unverified until it runs somewhere with a GPU. This command is
-//! how you verify it: each op is run on both backends over the same random
-//! input and the largest absolute difference is reported. Anything materially
-//! above single-precision rounding error means the kernel and its host twin
-//! have diverged.
+//! Each op is run on the CPU and on the device over the same random input,
+//! and the largest absolute and relative differences are reported. Anything
+//! materially above single-precision rounding error means a kernel and its
+//! host twin have diverged.
 //!
-//! Run it first, before trusting a training run:
+//! This is not a formality. The kernels were written on a machine with no GPU
+//! of any kind, and the first run on real AMD hardware turned up a genuine
+//! out-of-bounds write in `add_bias_kernel`. This command finds that class of
+//! bug in seconds and names the kernel; skipping it and going straight to
+//! `predict` produces an illegal memory access attributed to an unrelated
+//! memcpy several layers later.
+//!
+//! Run it first, on each backend, before trusting a training run:
 //!     darknet-zig gputest -gpu 0
 
 const std = @import("std");
@@ -64,7 +69,7 @@ pub fn run(allocator: std.mem.Allocator) !void {
     defer gpu.setSyncAfterLaunch(false);
 
     var rng = utils.Rng.init(20240921);
-    sys.print("\nComparing CPU and HIP implementations (tolerance {e}):\n\n", .{tolerance});
+    sys.print("\nComparing CPU and {s} implementations (tolerance {e}):\n\n", .{ gpu.backend_label, tolerance });
 
     try elementwise(allocator, &rng);
     try biasAndNorm(allocator, &rng);

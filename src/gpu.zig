@@ -1,11 +1,24 @@
-//! The HIP backend: device buffers, the kernel registry, and one wrapper per
+//! The GPU layer: device buffers, the kernel registry, and one wrapper per
 //! device op.
 //!
+//! Everything below is backend-agnostic. The vendor-specific part is a small
+//! module selected at compile time -- `hip/hip.zig` for AMD, `cuda/cuda.zig`
+//! for NVIDIA -- which has to provide:
+//!
+//!     label, code_object_file, Error, success, Module, Function
+//!     errorString, initPlatform, deviceCount, setDevice, deviceName, memInfo
+//!     malloc, free, memsetZero, copyToDevice, copyToHost, synchronize
+//!     moduleLoad, moduleUnload, moduleGetFunction, launchKernel
+//!
+//! The two are interchangeable because this port never used the `<<<>>>`
+//! launch syntax: kernels live in a separately compiled code object and are
+//! looked up by name and launched by handle. That is HIP's module API and it
+//! is also, almost line for line, the CUDA driver API.
+//!
 //! Everything here compiles in a CPU-only build too -- `enabled` is false, the
-//! wrappers are unreachable, and no HIP symbol is ever referenced, so nothing
-//! needs to link against libamdhip64. That is what lets the project build and
-//! its CPU path be tested on a machine with no ROCm at all, which is exactly
-//! the situation it was written in.
+//! wrappers are unreachable, and no vendor symbol is ever referenced, so
+//! nothing needs to link against libamdhip64 or libcuda. That is what lets
+//! the project build and its CPU path be tested on a machine with neither.
 //!
 //! Each wrapper corresponds to one kernel in src/kernels/darknet_kernels.hip
 //! and to one function in blas.zig / im2col.zig / activations.zig. When you
@@ -14,10 +27,32 @@
 
 const std = @import("std");
 const build_options = @import("build_options");
-const hip = @import("hip/hip.zig");
 const sys = @import("sys.zig");
 
 pub const enabled = build_options.gpu;
+
+/// The vendor backend. Both are always importable -- they are only extern
+/// declarations -- but only the selected one is ever called, and an unused
+/// `extern fn` creates no link dependency.
+const api = if (build_options.cuda) @import("cuda/cuda.zig") else @import("hip/hip.zig");
+
+pub const backend_label = api.label;
+
+fn check(err: api.Error, what: []const u8) !void {
+    if (err != api.success) {
+        std.debug.print("{s}: {s} failed: {s}\n", .{ api.label, what, api.errorString(err) });
+        return error.GpuError;
+    }
+}
+
+/// For the hot path, where there is no useful recovery from a failed call and
+/// threading an error return through every layer would only obscure the
+/// maths. Mirrors darknet's `check_error`, which called `exit`.
+fn must(err: api.Error, what: []const u8) void {
+    if (err != api.success) {
+        std.debug.panic("{s}: {s} failed: {s}", .{ api.label, what, api.errorString(err) });
+    }
+}
 
 /// Threads per block for the 1-D kernels. Must match BLOCK in the .hip file.
 pub const block_size: u32 = 256;
@@ -56,19 +91,19 @@ pub fn active() bool {
     return enabled and device_index >= 0;
 }
 
-var module: hip.Module = null;
+var module: api.Module = null;
 var kernels: Kernels = undefined;
 
 /// A looked-up device function plus its symbol name. The name exists purely
 /// so a fault can say which kernel it came from: GPU faults surface at the
-/// next synchronising call, which is usually a `hipMemcpy` far away from the
+/// next synchronising call, which is usually a memcpy far away from the
 /// kernel that actually misbehaved.
 pub const Kernel = struct {
-    f: hip.Function = null,
+    f: api.Function = null,
     name: []const u8 = "",
 };
 
-/// When set (via DARKNET_HIP_SYNC=1) every launch is followed by a device
+/// When set (via DARKNET_GPU_SYNC=1) every launch is followed by a device
 /// synchronise and an error check, so a fault is reported against the kernel
 /// that caused it instead of the next memcpy. Costs a full pipeline stall per
 /// launch, so it is strictly a debugging aid.
@@ -129,57 +164,63 @@ const Kernels = struct {
     gemm_kernel: Kernel = .{},
 };
 
-/// Locate darknet_kernels.hsaco. The build installs it next to the executable;
-/// $DARKNET_HSACO overrides that, which is what you want when running out of a
-/// build tree or shipping the code object separately from the binary.
+/// Locate the compiled device code -- `darknet_kernels.hsaco` on AMD,
+/// `darknet_kernels.ptx` on NVIDIA. The build installs it next to the
+/// executable; $DARKNET_KERNELS overrides that, which is what you want when
+/// running out of a build tree or shipping the code object separately.
+/// $DARKNET_HSACO is still honoured as the older name for the same thing.
 fn findCodeObject(allocator: std.mem.Allocator) ![:0]u8 {
-    if (std.c.getenv("DARKNET_HSACO")) |p| {
+    const override = std.c.getenv("DARKNET_KERNELS") orelse std.c.getenv("DARKNET_HSACO");
+    if (override) |p| {
         return allocator.dupeZ(u8, std.mem.sliceTo(p, 0));
     }
 
-    // Resolve the executable's own directory. ROCm is Linux-only in practice,
-    // so /proc/self/exe is a fair assumption; if it isn't there, fall back to
-    // the working directory and let the load error say what was tried.
+    // Resolve the executable's own directory. Both ROCm and CUDA are
+    // effectively Linux-only here, so /proc/self/exe is a fair assumption; if
+    // it isn't there, fall back to the working directory and let the load
+    // error say what was tried.
     var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const len = std.Io.Dir.readLinkAbsolute(sys.io, "/proc/self/exe", &buf) catch {
-        return allocator.dupeZ(u8, "darknet_kernels.hsaco");
+        return allocator.dupeZ(u8, api.code_object_file);
     };
     const exe_path = buf[0..len];
     const exe_dir = std.fs.path.dirname(exe_path) orelse ".";
-    return std.fmt.allocPrintSentinel(allocator, "{s}/darknet_kernels.hsaco", .{exe_dir}, 0);
+    return std.fmt.allocPrintSentinel(allocator, "{s}/{s}", .{ exe_dir, api.code_object_file }, 0);
 }
 
 pub fn init(allocator: std.mem.Allocator, index: i32) !void {
     if (!enabled) {
         std.debug.print(
             \\This binary was built without GPU support.
-            \\Rebuild with: zig build -Dgpu=true -Drocm-path=$ROCM_PATH -Doffload-arch=<your gfx>
+            \\Rebuild with one of:
+            \\  AMD:    zig build -Dgpu=true -Drocm-path=$ROCM_PATH -Doffload-arch=<your gfx>
+            \\  NVIDIA: zig build -Dgpu=true -Dgpu-backend=cuda -Dcuda-path=$CUDA_PATH
             \\
         , .{});
         return error.GpuNotCompiledIn;
     }
 
     var count: c_int = 0;
-    try hip.check(hip.hipGetDeviceCount(&count), "hipGetDeviceCount");
+    try check(api.initPlatform(), "initialising the driver");
+    try check(api.deviceCount(&count), "querying device count");
     if (index >= count) {
         std.debug.print("Requested GPU {d} but only {d} HIP device(s) present\n", .{ index, count });
         return error.NoSuchDevice;
     }
-    try hip.check(hip.hipSetDevice(index), "hipSetDevice");
+    try check(api.setDevice(index), "selecting the device");
 
-    var dev: hip.Device = 0;
     var name: [256]u8 = @splat(0);
-    if (hip.hipDeviceGet(&dev, index) == hip.success) {
-        _ = hip.hipDeviceGetName(&name, name.len - 1, dev);
-    }
+    api.deviceName(index, &name);
 
     const path = try findCodeObject(allocator);
     defer allocator.free(path);
-    hip.check(hip.hipModuleLoad(&module, path.ptr), "hipModuleLoad") catch {
+    check(api.moduleLoad(&module, path.ptr), "loading the device code object") catch {
         std.debug.print(
             \\Failed to load device code from: {s}
-            \\The .hsaco must have been compiled for this GPU's architecture.
-            \\Check `rocminfo | grep gfx` and rebuild with -Doffload-arch=<that>.
+            \\On AMD the .hsaco must match the GPU architecture: check
+            \\`rocminfo | grep gfx` and rebuild with -Doffload-arch=<that>.
+            \\On NVIDIA the .ptx is JIT-compiled, so a failure here usually means
+            \\the file is missing or the driver is older than the PTX version.
             \\
         , .{path});
         return error.CodeObjectLoadFailed;
@@ -187,15 +228,16 @@ pub fn init(allocator: std.mem.Allocator, index: i32) !void {
 
     kernels = .{};
     inline for (@typeInfo(Kernels).@"struct".fields) |f| {
-        var fun: hip.Function = null;
-        try hip.check(hip.hipModuleGetFunction(&fun, module, f.name ++ ""), "hipModuleGetFunction " ++ f.name);
+        var fun: api.Function = null;
+        try check(api.moduleGetFunction(&fun, module, f.name ++ ""), "looking up kernel " ++ f.name);
         @field(kernels, f.name) = .{ .f = fun, .name = f.name };
     }
 
-    if (std.c.getenv("DARKNET_HIP_SYNC")) |v| {
+    const sync_env = std.c.getenv("DARKNET_GPU_SYNC") orelse std.c.getenv("DARKNET_HIP_SYNC");
+    if (sync_env) |v| {
         sync_after_launch = std.mem.sliceTo(v, 0).len > 0 and v[0] != '0';
         if (sync_after_launch) {
-            std.debug.print("DARKNET_HIP_SYNC set: synchronising and checking after every kernel launch.\n", .{});
+            std.debug.print("DARKNET_GPU_SYNC set: synchronising and checking after every kernel launch.\n", .{});
         }
     }
 
@@ -203,8 +245,9 @@ pub fn init(allocator: std.mem.Allocator, index: i32) !void {
 
     var free_mem: usize = 0;
     var total_mem: usize = 0;
-    _ = hip.hipMemGetInfo(&free_mem, &total_mem);
-    std.debug.print("HIP device {d}: {s} ({d} MiB free / {d} MiB total)\n", .{
+    _ = api.memInfo(&free_mem, &total_mem);
+    std.debug.print("{s} device {d}: {s} ({d} MiB free / {d} MiB total)\n", .{
+        api.label,
         index,
         std.mem.sliceTo(&name, 0),
         free_mem >> 20,
@@ -215,7 +258,7 @@ pub fn init(allocator: std.mem.Allocator, index: i32) !void {
 pub fn deinit() void {
     if (!enabled) return;
     if (module != null) {
-        _ = hip.hipModuleUnload(module);
+        _ = api.moduleUnload(module);
         module = null;
     }
     device_index = -1;
@@ -229,8 +272,8 @@ pub fn alloc(n: usize) Buf {
     if (!enabled) unreachable;
     if (n == 0) return .{};
     var ptr: ?*anyopaque = null;
-    hip.must(hip.hipMalloc(&ptr, n * @sizeOf(f32)), "hipMalloc");
-    hip.must(hip.hipMemset(ptr, 0, n * @sizeOf(f32)), "hipMemset");
+    must(api.malloc(&ptr, n * @sizeOf(f32)), "device allocation");
+    must(api.memsetZero(ptr, n * @sizeOf(f32)), "zeroing device memory");
     return .{ .ptr = ptr, .len = n };
 }
 
@@ -249,30 +292,30 @@ pub fn make(host: []const f32) Buf {
 
 pub fn free(b: Buf) void {
     if (!enabled) return;
-    if (b.ptr) |p| hip.must(hip.hipFree(p), "hipFree");
+    if (b.ptr) |p| must(api.free(p), "device free");
 }
 
 pub fn push(b: Buf, host: []const f32) void {
     if (!enabled) unreachable;
     if (host.len == 0 or b.ptr == null) return;
-    hip.must(hip.hipMemcpy(b.ptr, host.ptr, host.len * @sizeOf(f32), hip.memcpy_host_to_device), "hipMemcpy H2D");
+    must(api.copyToDevice(b.ptr, host.ptr, host.len * @sizeOf(f32)), "copy host to device");
 }
 
 pub fn pull(b: Buf, host: []f32) void {
     if (!enabled) unreachable;
     if (host.len == 0 or b.ptr == null) return;
-    hip.must(hip.hipMemcpy(host.ptr, b.ptr, host.len * @sizeOf(f32), hip.memcpy_device_to_host), "hipMemcpy D2H");
+    must(api.copyToHost(host.ptr, b.ptr, host.len * @sizeOf(f32)), "copy device to host");
 }
 
 pub fn pullInts(b: Buf, host: []i32) void {
     if (!enabled) unreachable;
     if (host.len == 0 or b.ptr == null) return;
-    hip.must(hip.hipMemcpy(host.ptr, b.ptr, host.len * @sizeOf(i32), hip.memcpy_device_to_host), "hipMemcpy D2H int");
+    must(api.copyToHost(host.ptr, b.ptr, host.len * @sizeOf(i32)), "copy device to host (ints)");
 }
 
 pub fn sync() void {
     if (!enabled) return;
-    hip.must(hip.hipDeviceSynchronize(), "hipDeviceSynchronize");
+    must(api.synchronize(), "device synchronise");
 }
 
 // ---------------------------------------------------------------------------
@@ -306,25 +349,25 @@ fn launchDims(
         params[i] = @ptrCast(&@field(local, f.name));
     }
 
-    const launch_err = hip.hipModuleLaunchKernel(k.f, gx, gy, 1, bx, by, 1, 0, null, &params, null);
-    if (launch_err != hip.success) {
+    const launch_err = api.launchKernel(k.f, gx, gy, 1, bx, by, 1, 0, &params);
+    if (launch_err != api.success) {
         std.debug.panic(
-            "HIP: launching {s} <<<({d},{d}),({d},{d})>>> failed: {s}",
-            .{ k.name, gx, gy, bx, by, hip.hipGetErrorString(launch_err) },
+            "{s}: launching {s} <<<({d},{d}),({d},{d})>>> failed: {s}",
+            .{ api.label, k.name, gx, gy, bx, by, api.errorString(launch_err) },
         );
     }
 
     // A launch is asynchronous, so a bad memory access inside the kernel is
     // not reported here -- it surfaces at the next synchronising call, which
     // is typically a memcpy several layers later and tells you nothing about
-    // the cause. Under DARKNET_HIP_SYNC we pay for a stall to get the blame
+    // the cause. Under DARKNET_GPU_SYNC we pay for a stall to get the blame
     // attached to the right kernel.
     if (sync_after_launch) {
-        const err = hip.hipDeviceSynchronize();
-        if (err != hip.success) {
+        const err = api.synchronize();
+        if (err != api.success) {
             std.debug.panic(
-                "HIP: {s} <<<({d},{d}),({d},{d})>>> faulted: {s}",
-                .{ k.name, gx, gy, bx, by, hip.hipGetErrorString(err) },
+                "{s}: {s} <<<({d},{d}),({d},{d})>>> faulted: {s}",
+                .{ api.label, k.name, gx, gy, bx, by, api.errorString(err) },
             );
         }
     }

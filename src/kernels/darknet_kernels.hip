@@ -18,7 +18,15 @@
 //   * `gradient` functions take the activation's *output*, not its input
 // =============================================================================
 
-#include <hip/hip_runtime.h>
+// The kernels themselves are portable: `__global__`, `__shared__`,
+// `__syncthreads`, the block/thread builtins and the float math functions are
+// spelled identically in HIP and CUDA. Only the header differs, so one source
+// file serves both backends -- hipcc compiles it for amdgcn, nvcc for PTX.
+#if defined(__CUDACC__)
+  #include <cuda_runtime.h>
+#else
+  #include <hip/hip_runtime.h>
+#endif
 
 // Threads per block for the 1-D elementwise kernels. 256 is four wave64s on
 // AMD, which schedules better than the 512 darknet used for NVIDIA. The Zig

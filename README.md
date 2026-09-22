@@ -1,8 +1,8 @@
 # darknet-zig
 
 A rewrite of [pjreddie's darknet](https://github.com/pjreddie/darknet) from C to
-Zig, scoped to **training and running image classifiers**, with an AMD **HIP**
-backend in place of darknet's CUDA one.
+Zig, scoped to **training and running image classifiers**, with GPU backends for
+both **AMD** (HIP) and **NVIDIA** (CUDA driver API).
 
 Weights and `.cfg` files are byte-compatible with upstream darknet in both
 directions. Running the stock `tiny.cfg` + `tiny.weights` ImageNet model through
@@ -20,16 +20,23 @@ $ darknet-zig  classifier predict cfg/imagenet1k.data cfg/tiny.cfg tiny.weights 
 
 ## Status
 
-The CPU path is verified end to end: it trains, the loss falls, checkpoints
-round-trip through darknet, and it reproduces upstream's inference numerically.
+| | |
+|---|---|
+| CPU | verified end to end: trains, checkpoints round-trip through darknet, reproduces upstream's inference numerically |
+| AMD (HIP) | **working on hardware** -- an RX 6650 XT runs ~10x the speed of an 8-core CPU |
+| NVIDIA (CUDA) | **compiles and links, never executed** -- no NVIDIA GPU was available |
 
-**The HIP path is newly exercised and not yet trusted.** It was developed on a
-machine with no AMD card. The first real run found a genuine kernel bug (a
-dropped divide in `add_bias_kernel`/`scale_bias_kernel`, since fixed) and there
-may be more. **Run `darknet-zig gputest -gpu 0` before anything else** -- it
-compares every op against its CPU twin and would have caught that one in
-seconds, whereas going straight to `predict` produced an illegal memory access
-blamed on an unrelated memcpy.
+The NVIDIA backend is in the state the AMD one was in before its first real
+run, and that run found a genuine out-of-bounds write in a kernel. The kernels
+are shared between the two backends and are now known-good on AMD, which is
+real evidence, but the host side -- 19 driver-API entry points, device pointers
+represented as integers, a different context model -- has only ever been
+checked by the compiler and the linker.
+
+**Run `darknet-zig gputest -gpu 0` first, on each backend.** It compares every
+op against its CPU twin and names the kernel that disagrees. Going straight to
+`predict` is how the AMD bug presented as an illegal memory access blamed on an
+unrelated memcpy three layers away.
 
 ## Building
 
@@ -39,23 +46,34 @@ nix develop                        # or bring your own Zig 0.16 + ROCm
 # CPU only -- no ROCm needed
 zig build -Doptimize=ReleaseFast
 
-# With the HIP backend
+# AMD, via HIP
 rocminfo | grep gfx                # find your GPU's ISA, e.g. gfx1030
 zig build -Doptimize=ReleaseFast -Dgpu=true \
           -Drocm-path=$ROCM_PATH -Doffload-arch=gfx1030
+
+# NVIDIA, via the CUDA driver API
+zig build -Doptimize=ReleaseFast -Dgpu=true -Dgpu-backend=cuda \
+          -Dcuda-path=$CUDA_PATH
 ```
 
-`-Doffload-arch` takes a comma-separated list (`gfx1030,gfx1100`), which bundles
-several ISAs into one code object -- useful when the build machine and the GPU
-machine differ.
+On AMD, `-Doffload-arch` takes a comma-separated list (`gfx1030,gfx1100`),
+bundling several ISAs into one code object -- useful when the build machine and
+the GPU machine differ. On NVIDIA there is no equivalent list: the kernels are
+emitted as PTX and JIT-compiled by the driver, so one artifact runs on any GPU
+at or above `-Dcuda-arch` (default `compute_52`).
 
-Two artifacts land in `zig-out/bin`: the `darknet-zig` executable and
-`darknet_kernels.hsaco`, the compiled device code. The executable looks for the
-code object next to itself; `DARKNET_HSACO=/path/to/darknet_kernels.hsaco`
-overrides that.
+Two artifacts land in `zig-out/bin`: the `darknet-zig` executable and the
+compiled device code -- `darknet_kernels.hsaco` on AMD, `darknet_kernels.ptx`
+on NVIDIA. The executable looks for it next to itself;
+`DARKNET_KERNELS=/path/to/it` overrides that.
 
 `zig build kernels` compiles only the device code, which is a fast syntax check
-on a machine with `hipcc` but no GPU.
+on a machine that has the compiler but no matching card.
+
+A CUDA-backend binary links against `libcuda.so.1`, which comes from the NVIDIA
+*driver*, not the toolkit. The build binds to the toolkit's stub and the real
+library is resolved at load, so the build machine needs no NVIDIA GPU -- but a
+machine with no driver cannot start the binary at all.
 
 ## Running
 
@@ -268,7 +286,8 @@ src/
   image.zig           decode, resize, crop, colour, augmentation
   data.zig            dataset loading, overlapped with training
   gpu.zig             HIP backend: buffers, kernel registry, op wrappers
-  hip/hip.zig         HIP runtime bindings
+  hip/hip.zig         AMD backend: HIP runtime bindings
+  cuda/cuda.zig       NVIDIA backend: CUDA driver API bindings
   kernels/*.hip       device kernels -- the only C++ in the project
   c/                  stb_image, the only host C
   smoke_test.zig      end-to-end tests
@@ -360,3 +379,56 @@ make LLVM emit packed FMAs, but measured no faster, so vectorization alone is
 not the whole story and the honest fix is a blocked GEMM that reuses each `B`
 row across several `C` rows. Not attempted; the GPU backend is the answer to
 throughput here, and on the CPU the thread pool hides most of it.
+
+## Why NVIDIA goes through the CUDA driver API, not HIP
+
+HIP does target NVIDIA, but not in a way this project can use.
+
+On AMD, `hipMalloc` is a real symbol exported from `libamdhip64.so`, which is
+what lets Zig call it with an `extern fn` and keep the host side entirely in
+Zig. On NVIDIA, HIP is header-only: `hip/nvidia_detail/` defines `hipMalloc` as
+an inline wrapper around `cudaMalloc`, so the symbol exists only inside a
+translation unit compiled by hipcc. There is no `libhip-nvidia.so` to link
+against. Using HIP here would mean compiling the host code as C++, which is the
+one thing the port set out to avoid.
+
+The CUDA *driver* API (`libcuda.so`, shipped with every NVIDIA driver) is a
+real C library and turned out to be a near drop-in replacement, because this
+port never used the `<<<>>>` launch syntax. Kernels already lived in a
+separately compiled code object, looked up by name and launched by handle --
+which is HIP's module API, and is also, almost line for line, the driver API:
+
+| HIP | CUDA driver |
+|---|---|
+| `hipModuleLoad` | `cuModuleLoad` |
+| `hipModuleGetFunction` | `cuModuleGetFunction` |
+| `hipModuleLaunchKernel` | `cuLaunchKernel` |
+| `hipMalloc` | `cuMemAlloc_v2` |
+| `hipMemcpy` | `cuMemcpyHtoD_v2` / `cuMemcpyDtoH_v2` |
+| `hipSetDevice` | `cuDevicePrimaryCtxRetain` + `cuCtxSetCurrent` |
+
+The CUDA *runtime* API would not have worked: `cudaLaunchKernel` resolves
+kernels through fatbin registration that nvcc emits into host code, and there
+is no host code here for it to emit into.
+
+Three differences were worth handling rather than papering over:
+
+- **`CUdeviceptr` is an integer**, not a pointer. It is pointer-width, so the
+  value round-trips through `?*anyopaque` and the 36 op wrappers stay
+  pointer-typed. It also means `&buf.ptr` is still the right thing to hand to
+  `cuLaunchKernel` for a `float*` parameter: eight bytes holding the address.
+- **The `_v2` suffixes are mandatory.** CUDA's headers `#define cuMemAlloc
+  cuMemAlloc_v2`, so the unsuffixed names are not what `libcuda` exports. A
+  wrong name here is a link error rather than a runtime surprise, which is
+  exactly why linking against the stub is a useful check.
+- **`cuInit(0)` must come first.** The runtime API initialises lazily; the
+  driver API does not.
+
+The kernels needed one conditional include and nothing else -- `__global__`,
+`__shared__`, `__syncthreads`, the block and thread builtins and the float math
+functions are spelled identically in both. `nvcc -ptx` emits all 36 entry
+points, the same set `hipcc --genco` produces.
+
+PTX rather than a cubin, so the driver JIT-compiles on load and one artifact
+runs on any architecture at or above `-Dcuda-arch`. That is strictly nicer than
+the AMD side, where `--offload-arch` has to name every ISA up front.

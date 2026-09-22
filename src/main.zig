@@ -1,5 +1,5 @@
 //! darknet-zig: a Zig rewrite of pjreddie's darknet, scoped to training and
-//! running image classifiers, with an AMD HIP backend.
+//! running image classifiers, with AMD (HIP) and NVIDIA (CUDA) GPU backends.
 //!
 //! Usage:
 //!   darknet-zig classifier train   <data.cfg> <net.cfg> [weights] [-clear]
@@ -18,7 +18,7 @@ const classifier = @import("classifier.zig");
 const gputest = @import("gputest.zig");
 
 const usage =
-    \\darknet-zig -- neural networks in Zig, with an AMD HIP backend
+    \\darknet-zig -- neural networks in Zig, with AMD (HIP) and NVIDIA (CUDA) backends
     \\
     \\Usage:
     \\  darknet-zig classifier train   <data.cfg> <net.cfg> [weights] [options]
@@ -27,7 +27,7 @@ const usage =
     \\  darknet-zig gputest [options]
     \\
     \\Options:
-    \\  -gpu <index>     Run on HIP device <index> (default: CPU)
+    \\  -gpu <index>     Run on GPU device <index> (default: CPU)
     \\  -seed <n>        Seed the random number generator (default: time based)
     \\  -threads <n>     Image loader worker tasks (default: 8)
     \\  -top <k>         Report the k highest-scoring classes (default: from data.cfg)
@@ -136,7 +136,7 @@ fn run(init: std.process.Init) !void {
     if (args.gpu_index >= 0) {
         try gpu.init(allocator, args.gpu_index);
     } else if (build_options.gpu) {
-        std.debug.print("Running on the CPU; pass -gpu <index> to use a HIP device.\n", .{});
+        std.debug.print("Running on the CPU; pass -gpu <index> to use the {s} backend.\n", .{gpu.backend_label});
     }
     defer gpu.deinit();
 

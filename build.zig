@@ -8,8 +8,16 @@ pub fn build(b: *std.Build) void {
     // Options
     // -------------------------------------------------------------------
     // GPU support is off by default so the project builds and the CPU path
-    // stays testable on machines with no ROCm installed at all.
-    const gpu = b.option(bool, "gpu", "Build with the AMD HIP backend") orelse false;
+    // stays testable on machines with no ROCm or CUDA installed at all.
+    const gpu = b.option(bool, "gpu", "Build with a GPU backend") orelse false;
+
+    const Backend = enum { hip, cuda };
+    const backend = b.option(
+        Backend,
+        "gpu-backend",
+        "Which GPU backend to build: hip (AMD, default) or cuda (NVIDIA)",
+    ) orelse .hip;
+    const cuda = backend == .cuda;
 
     // Comma-separated list, e.g. -Doffload-arch=gfx1030,gfx1100. hipcc happily
     // takes several --offload-arch flags and bundles every ISA into one code
@@ -21,14 +29,27 @@ pub fn build(b: *std.Build) void {
         "AMD GPU target(s), comma separated, e.g. gfx1030,gfx1100",
     ) orelse "gfx1030";
 
+    // The NVIDIA side needs no equivalent list. We emit PTX, which the driver
+    // JIT-compiles on load, so one artifact runs on any GPU at or above this
+    // virtual architecture. compute_52 (Maxwell) is about as low as CUDA 12
+    // still accepts; raise it if you want to drop the deprecation warning or
+    // use newer PTX features.
+    const cuda_arch = b.option(
+        []const u8,
+        "cuda-arch",
+        "NVIDIA virtual architecture for the PTX, e.g. compute_52",
+    ) orelse "compute_52";
+
     // Passed in from the shell rather than read inside build.zig: the exact
     // std.Build API for reading environment variables keeps moving between
     // Zig releases, so `nix develop` just expands $ROCM_PATH on the command
     // line. Same convention the zig-hip demo used.
     const rocm_path = b.option([]const u8, "rocm-path", "Path to the ROCm/HIP install") orelse "/opt/rocm";
+    const cuda_path = b.option([]const u8, "cuda-path", "Path to the CUDA toolkit install") orelse "/usr/local/cuda";
 
     const options = b.addOptions();
     options.addOption(bool, "gpu", gpu);
+    options.addOption(bool, "cuda", cuda);
 
     // -------------------------------------------------------------------
     // The library module: everything except the CLI entry point
@@ -49,8 +70,38 @@ pub fn build(b: *std.Build) void {
     });
 
     if (gpu) {
-        mod.addLibraryPath(.{ .cwd_relative = b.fmt("{s}/lib", .{rocm_path}) });
-        mod.linkSystemLibrary("amdhip64", .{});
+        if (cuda) {
+            // libcuda ships with the *driver*, not the toolkit, so at link
+            // time we bind against the toolkit's stub and the real one is
+            // resolved at load. This is the standard arrangement for driver
+            // API programs and is why a build machine needs no NVIDIA GPU.
+            //
+            // Where the stub lives varies by distribution, and Zig treats a
+            // library path that does not exist as an error rather than a
+            // warning, so probe rather than adding every candidate.
+            const candidates = [_][]const u8{
+                "lib64/stubs", "lib/stubs", "lib/x86_64-linux-gnu/stubs",
+                "lib64",       "lib",
+            };
+            var found_stub = false;
+            for (candidates) |rel| {
+                const dir = b.fmt("{s}/{s}", .{ cuda_path, rel });
+                std.Io.Dir.accessAbsolute(b.graph.io, dir, .{}) catch continue;
+                mod.addLibraryPath(.{ .cwd_relative = dir });
+                found_stub = true;
+            }
+            if (!found_stub) {
+                std.debug.print(
+                    "warning: no library directory found under {s}; " ++
+                        "pass -Dcuda-path=<toolkit root> if linking against libcuda fails\n",
+                    .{cuda_path},
+                );
+            }
+            mod.linkSystemLibrary("cuda", .{});
+        } else {
+            mod.addLibraryPath(.{ .cwd_relative = b.fmt("{s}/lib", .{rocm_path}) });
+            mod.linkSystemLibrary("amdhip64", .{});
+        }
     }
 
     const exe = b.addExecutable(.{
@@ -62,27 +113,49 @@ pub fn build(b: *std.Build) void {
     // -------------------------------------------------------------------
     // Device kernels
     // -------------------------------------------------------------------
-    // Zig has no amdgcn backend, so the kernels are HIP C++ compiled by hipcc
-    // into a standalone code object (.hsaco) that the Zig host code loads at
-    // runtime through hipModuleLoad. This is the entire C++ surface of the
-    // project.
+    // Zig can target neither amdgcn nor nvptx, so the kernels are compiled by
+    // the vendor toolchain into a standalone code object that the Zig host
+    // loads at runtime. One source file serves both; see its header. This is
+    // the entire C++ surface of the project.
     if (gpu) {
-        const hipcc = b.addSystemCommand(&.{"hipcc"});
-        var it = std.mem.tokenizeScalar(u8, offload_arch, ',');
-        while (it.next()) |arch| {
-            hipcc.addArg(b.fmt("--offload-arch={s}", .{arch}));
-        }
-        hipcc.addArgs(&.{ "-O3", "-c", "--genco", "-o" });
-        const hsaco = hipcc.addOutputFileArg("darknet_kernels.hsaco");
-        hipcc.addFileArg(b.path("src/kernels/darknet_kernels.hip"));
+        const object: std.Build.LazyPath = if (cuda) blk: {
+            // -x cu because the file is named .hip. PTX rather than a cubin,
+            // so the result is architecture-independent.
+            const nvcc = b.addSystemCommand(&.{b.fmt("{s}/bin/nvcc", .{cuda_path})});
+            nvcc.addArgs(&.{
+                "-ptx",
+                "-x",  "cu",
+                "-O3", b.fmt("-arch={s}", .{cuda_arch}),
+                "-Wno-deprecated-gpu-targets",
+                // nvcc normally finds cuda_runtime.h relative to its own
+                // binary; say it explicitly so a wrapper script or a symlink
+                // into the toolkit still works.
+                b.fmt("-I{s}/include", .{cuda_path}),
+                "-o",
+            });
+            const ptx = nvcc.addOutputFileArg("darknet_kernels.ptx");
+            nvcc.addFileArg(b.path("src/kernels/darknet_kernels.hip"));
+            break :blk ptx;
+        } else blk: {
+            const hipcc = b.addSystemCommand(&.{"hipcc"});
+            var it = std.mem.tokenizeScalar(u8, offload_arch, ',');
+            while (it.next()) |arch| {
+                hipcc.addArg(b.fmt("--offload-arch={s}", .{arch}));
+            }
+            hipcc.addArgs(&.{ "-O3", "-c", "--genco", "-o" });
+            const hsaco = hipcc.addOutputFileArg("darknet_kernels.hsaco");
+            hipcc.addFileArg(b.path("src/kernels/darknet_kernels.hip"));
+            break :blk hsaco;
+        };
 
-        const install_hsaco = b.addInstallFileWithDir(hsaco, .bin, "darknet_kernels.hsaco");
-        b.getInstallStep().dependOn(&install_hsaco.step);
+        const object_name = if (cuda) "darknet_kernels.ptx" else "darknet_kernels.hsaco";
+        const install_object = b.addInstallFileWithDir(object, .bin, object_name);
+        b.getInstallStep().dependOn(&install_object.step);
 
         // A step that builds *only* the code object, so you can syntax-check
-        // the kernels on a machine with hipcc but no AMD card in it.
-        const kernels_step = b.step("kernels", "Compile the HIP device kernels only");
-        kernels_step.dependOn(&install_hsaco.step);
+        // the kernels on a machine that has the compiler but no matching card.
+        const kernels_step = b.step("kernels", "Compile the device kernels only");
+        kernels_step.dependOn(&install_object.step);
     }
 
     // -------------------------------------------------------------------
