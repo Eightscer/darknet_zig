@@ -70,16 +70,17 @@ on NVIDIA. The executable looks for it next to itself;
 `zig build kernels` compiles only the device code, which is a fast syntax check
 on a machine that has the compiler but no matching card.
 
-A CUDA-backend binary links against `libcuda.so.1`, which comes from the NVIDIA
-*driver*, not the toolkit. The build binds to the toolkit's stub and the real
-library is resolved at load, so the build machine needs no NVIDIA GPU -- but a
-machine with no driver cannot start the binary at all.
+The CUDA build links against no CUDA library at all: `libcuda.so.1` is opened
+with `dlopen` at startup. So `-Dcuda-path` is needed only to find **nvcc** and
+`cuda_runtime.h` for compiling the kernels -- it must point at a directory with
+`bin/nvcc` and `include/cuda_runtime.h`. A distro CUDA install already looks
+like that; on NixOS the pieces live in separate store paths, so the `cuda` dev
+shell joins them into one root and exports it as `$CUDA_PATH`.
 
-`-Dcuda-path` must point at a directory laid out like a CUDA toolkit:
-`bin/nvcc`, `include/cuda_runtime.h` and a `libcuda.so` stub under `lib/stubs`
-(or `lib64/stubs`; the build probes). A distro CUDA install already looks like
-that. On NixOS the pieces live in separate store paths, so the `cuda` dev shell
-joins them into one root and exports it as `$CUDA_PATH`.
+The binary itself has no CUDA dependency, runs on a machine with no driver
+(reporting so cleanly), and finds the driver at run time -- including in
+`/run/opengl-driver/lib`, where NixOS puts it and the default loader path does
+not look. See the note on the stub library below for why it is done this way.
 
 ## Running
 
@@ -438,3 +439,37 @@ points, the same set `hipcc --genco` produces.
 PTX rather than a cubin, so the driver JIT-compiles on load and one artifact
 runs on any architecture at or above `-Dcuda-arch`. That is strictly nicer than
 the AMD side, where `--offload-arch` has to name every ISA up front.
+
+### The stub library trap
+
+`libcuda.so` exists in two forms, with the same soname:
+
+- the **driver's**, installed with the NVIDIA kernel driver -- the real thing;
+- a **stub** shipped in the CUDA toolkit's `lib/stubs`, which exists only so
+  programs can be linked on machines without a driver. Its entry points
+  resolve, and do nothing.
+
+Link against the stub in the ordinary way and Zig writes that directory into
+the binary's `RUNPATH`, so at run time the loader finds the stub *before* the
+driver. Every call then fails, and unhelpfully: the stub cannot describe its
+own errors either, so `cuGetErrorString` returns nothing and you get
+
+```
+CUDA: initialising the driver failed: unknown CUDA error
+```
+
+The actual code is `CUresult 34`, `CUDA_ERROR_STUB_LIBRARY` -- "the CUDA driver
+that the application has loaded is a stub library". Which says precisely what
+is wrong, if you can get at it.
+
+This backend sidesteps the whole thing by not linking `libcuda` at all and
+`dlopen`ing the driver, trying the loader path first and then the places
+distributions hide it. Two smaller benefits fall out: the CUDA toolkit becomes
+a build-time-only dependency, and the binary starts (and explains itself) on a
+machine with no driver rather than failing to load.
+
+`cuGetErrorString` is still used for error text, but when it fails there is now
+a fallback table naming the codes worth recognising before a working driver is
+established -- 34 above, plus `CUDA_ERROR_NO_DEVICE`,
+`CUDA_ERROR_UNSUPPORTED_PTX_VERSION` (driver older than the PTX; lower
+`-Dcuda-arch`) and `CUDA_ERROR_INVALID_PTX`.

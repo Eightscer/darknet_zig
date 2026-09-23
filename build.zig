@@ -71,33 +71,15 @@ pub fn build(b: *std.Build) void {
 
     if (gpu) {
         if (cuda) {
-            // libcuda ships with the *driver*, not the toolkit, so at link
-            // time we bind against the toolkit's stub and the real one is
-            // resolved at load. This is the standard arrangement for driver
-            // API programs and is why a build machine needs no NVIDIA GPU.
+            // Nothing to link. src/cuda/cuda.zig dlopens libcuda.so.1 at
+            // startup instead.
             //
-            // Where the stub lives varies by distribution, and Zig treats a
-            // library path that does not exist as an error rather than a
-            // warning, so probe rather than adding every candidate.
-            const candidates = [_][]const u8{
-                "lib64/stubs", "lib/stubs", "lib/x86_64-linux-gnu/stubs",
-                "lib64",       "lib",
-            };
-            var found_stub = false;
-            for (candidates) |rel| {
-                const dir = b.fmt("{s}/{s}", .{ cuda_path, rel });
-                std.Io.Dir.accessAbsolute(b.graph.io, dir, .{}) catch continue;
-                mod.addLibraryPath(.{ .cwd_relative = dir });
-                found_stub = true;
-            }
-            if (!found_stub) {
-                std.debug.print(
-                    "warning: no library directory found under {s}; " ++
-                        "pass -Dcuda-path=<toolkit root> if linking against libcuda fails\n",
-                    .{cuda_path},
-                );
-            }
-            mod.linkSystemLibrary("cuda", .{});
+            // The obvious alternative -- link against the toolkit's stub and
+            // let the driver's copy win at run time -- does not work here:
+            // `addLibraryPath` also writes the directory into the binary's
+            // RUNPATH, so the loader finds the *stub* first and every driver
+            // call fails in a way the stub cannot even describe. dlopen also
+            // means the toolkit is a build-time dependency only.
         } else {
             mod.addLibraryPath(.{ .cwd_relative = b.fmt("{s}/lib", .{rocm_path}) });
             mod.linkSystemLibrary("amdhip64", .{});

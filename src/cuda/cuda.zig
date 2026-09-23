@@ -1,4 +1,4 @@
-//! NVIDIA backend: hand-written bindings for the CUDA *driver* API.
+//! NVIDIA backend: bindings for the CUDA *driver* API, resolved at runtime.
 //!
 //! Why the driver API and not HIP, given that HIP nominally targets NVIDIA?
 //! Because HIP's NVIDIA support is header-only. On AMD, `hipMalloc` is a real
@@ -9,12 +9,28 @@
 //! would mean compiling the host side as C++, which is exactly what this
 //! project set out not to do.
 //!
-//! The CUDA driver API (`libcuda.so`, shipped with every NVIDIA driver) is a
-//! real C library, and it is a closer match than the CUDA *runtime* API: it
-//! loads separately compiled code objects and launches kernels by handle,
+//! The CUDA driver API is a closer match than the CUDA *runtime* API anyway:
+//! it loads separately compiled code objects and launches kernels by handle,
 //! which is precisely the structure the HIP backend already uses. The runtime
 //! API's `cudaLaunchKernel` instead relies on fatbin registration emitted by
 //! nvcc into host code, which we have none of.
+//!
+//! ## Why dlopen instead of linking
+//!
+//! `libcuda.so` comes from the NVIDIA *driver*, not the CUDA toolkit. The
+//! toolkit ships only a **stub** with the same soname, whose entry points
+//! exist to satisfy the linker and do nothing useful. Linking against that
+//! stub the ordinary way put its directory into the binary's RUNPATH, so at
+//! run time the loader resolved `libcuda.so.1` to the stub rather than the
+//! driver, and `cuInit` failed with an error code the stub could not even
+//! describe.
+//!
+//! Loading the driver explicitly avoids that trap entirely, and fixes a
+//! second one: on NixOS the real library lives in `/run/opengl-driver/lib`,
+//! which is not on the default loader search path. It also means the build
+//! needs no CUDA libraries at all -- only nvcc, to compile the kernels -- and
+//! that a machine with no driver gets a clear message instead of failing to
+//! start.
 //!
 //! This file implements the interface documented at the top of ../gpu.zig.
 
@@ -44,65 +60,152 @@ const Device = c_int;
 /// `float*` kernel parameter: eight bytes holding the device address.
 const DevicePtr = c_ulonglong;
 
-// The `_v2` suffixes are not optional. CUDA's headers `#define cuMemAlloc
-// cuMemAlloc_v2`, so the unsuffixed names are not what libcuda exports.
-extern fn cuInit(flags: c_uint) Error;
-extern fn cuDeviceGetCount(count: *c_int) Error;
-extern fn cuDeviceGet(device: *Device, ordinal: c_int) Error;
-extern fn cuDeviceGetName(name: [*]u8, len: c_int, device: Device) Error;
-extern fn cuDevicePrimaryCtxRetain(ctx: *Context, device: Device) Error;
-extern fn cuCtxSetCurrent(ctx: Context) Error;
-extern fn cuCtxSynchronize() Error;
-extern fn cuMemAlloc_v2(dptr: *DevicePtr, bytesize: usize) Error;
-extern fn cuMemFree_v2(dptr: DevicePtr) Error;
-extern fn cuMemcpyHtoD_v2(dst: DevicePtr, src: *const anyopaque, bytesize: usize) Error;
-extern fn cuMemcpyDtoH_v2(dst: *anyopaque, src: DevicePtr, bytesize: usize) Error;
-extern fn cuMemsetD8_v2(dst: DevicePtr, value: u8, n: usize) Error;
-extern fn cuMemGetInfo_v2(free: *usize, total: *usize) Error;
-extern fn cuModuleLoad(module: *Module, fname: [*:0]const u8) Error;
-extern fn cuModuleUnload(module: Module) Error;
-extern fn cuModuleGetFunction(function: *Function, module: Module, name: [*:0]const u8) Error;
-extern fn cuLaunchKernel(
-    f: Function,
-    grid_dim_x: c_uint,
-    grid_dim_y: c_uint,
-    grid_dim_z: c_uint,
-    block_dim_x: c_uint,
-    block_dim_y: c_uint,
-    block_dim_z: c_uint,
-    shared_mem_bytes: c_uint,
-    stream: Stream,
-    kernel_params: ?[*]?*anyopaque,
-    extra: ?[*]?*anyopaque,
-) Error;
-/// Unlike hipGetErrorString, this reports failure rather than returning the
-/// string, so it needs wrapping.
-extern fn cuGetErrorString(err: Error, str: *?[*:0]const u8) Error;
-extern fn cuGetErrorName(err: Error, str: *?[*:0]const u8) Error;
+/// Every driver entry point this backend uses. The field name *is* the
+/// symbol name, so loading is a comptime loop rather than 19 hand-written
+/// dlsym calls -- the same trick the kernel registry in gpu.zig uses.
+///
+/// The `_v2` suffixes are not optional: CUDA's headers `#define cuMemAlloc
+/// cuMemAlloc_v2`, so the unsuffixed names are not what libcuda exports.
+const Driver = struct {
+    cuInit: *const fn (flags: c_uint) callconv(.c) Error,
+    cuDeviceGetCount: *const fn (count: *c_int) callconv(.c) Error,
+    cuDeviceGet: *const fn (device: *Device, ordinal: c_int) callconv(.c) Error,
+    cuDeviceGetName: *const fn (name: [*]u8, len: c_int, device: Device) callconv(.c) Error,
+    cuDevicePrimaryCtxRetain: *const fn (ctx: *Context, device: Device) callconv(.c) Error,
+    cuCtxSetCurrent: *const fn (ctx: Context) callconv(.c) Error,
+    cuCtxSynchronize: *const fn () callconv(.c) Error,
+    cuMemAlloc_v2: *const fn (dptr: *DevicePtr, bytesize: usize) callconv(.c) Error,
+    cuMemFree_v2: *const fn (dptr: DevicePtr) callconv(.c) Error,
+    cuMemcpyHtoD_v2: *const fn (dst: DevicePtr, src: *const anyopaque, bytesize: usize) callconv(.c) Error,
+    cuMemcpyDtoH_v2: *const fn (dst: *anyopaque, src: DevicePtr, bytesize: usize) callconv(.c) Error,
+    cuMemsetD8_v2: *const fn (dst: DevicePtr, value: u8, n: usize) callconv(.c) Error,
+    cuMemGetInfo_v2: *const fn (free: *usize, total: *usize) callconv(.c) Error,
+    cuModuleLoad: *const fn (module: *Module, fname: [*:0]const u8) callconv(.c) Error,
+    cuModuleUnload: *const fn (module: Module) callconv(.c) Error,
+    cuModuleGetFunction: *const fn (function: *Function, module: Module, name: [*:0]const u8) callconv(.c) Error,
+    cuLaunchKernel: *const fn (
+        f: Function,
+        grid_dim_x: c_uint,
+        grid_dim_y: c_uint,
+        grid_dim_z: c_uint,
+        block_dim_x: c_uint,
+        block_dim_y: c_uint,
+        block_dim_z: c_uint,
+        shared_mem_bytes: c_uint,
+        stream: Stream,
+        kernel_params: ?[*]?*anyopaque,
+        extra: ?[*]?*anyopaque,
+    ) callconv(.c) Error,
+    /// Unlike hipGetErrorString, this reports failure rather than returning
+    /// the string, so it needs wrapping.
+    cuGetErrorString: *const fn (err: Error, str: *?[*:0]const u8) callconv(.c) Error,
+    cuGetErrorName: *const fn (err: Error, str: *?[*:0]const u8) callconv(.c) Error,
+};
 
-inline fn toDevicePtr(p: ?*anyopaque) DevicePtr {
-    return @intCast(@intFromPtr(p));
+var driver: Driver = undefined;
+var loaded = false;
+
+/// Where to look for the driver, in order. The bare soname covers the normal
+/// case; the rest are distributions that put it somewhere the default search
+/// path misses. `/run/opengl-driver/lib` is NixOS.
+const candidates = [_][:0]const u8{
+    "libcuda.so.1",
+    "/run/opengl-driver/lib/libcuda.so.1",
+    "/usr/lib/x86_64-linux-gnu/libcuda.so.1",
+    "/usr/lib64/libcuda.so.1",
+    "/usr/lib/libcuda.so.1",
+};
+
+/// Errors from this backend that are not CUresult values.
+const load_failed: Error = -1;
+const symbol_missing: Error = -2;
+
+var detail_buf: [512]u8 = @splat(0);
+var detail: []const u8 = "";
+
+fn setDetail(comptime fmt: []const u8, args: anytype) void {
+    detail = std.fmt.bufPrint(&detail_buf, fmt, args) catch "(message truncated)";
 }
 
 pub fn errorString(err: Error) [*:0]const u8 {
+    if (err == load_failed or err == symbol_missing or !loaded) {
+        // Not a CUresult, or the driver is not loaded so we cannot ask it.
+        detail_buf[@min(detail.len, detail_buf.len - 1)] = 0;
+        return @ptrCast(detail_buf[0.. :0].ptr);
+    }
     var str: ?[*:0]const u8 = null;
-    if (cuGetErrorString(err, &str) == success) {
+    if (driver.cuGetErrorString(err, &str) == success) {
         if (str) |s| return s;
     }
-    if (cuGetErrorName(err, &str) == success) {
+    if (driver.cuGetErrorName(err, &str) == success) {
         if (str) |s| return s;
     }
-    return "unknown CUDA error";
+    // The driver could not describe its own error. That is itself a signal:
+    // it happens when the "driver" is really the toolkit's stub. Fall back to
+    // a small table rather than printing nothing useful.
+    setDetail("{s} (CUresult {d})", .{ fallbackName(err), err });
+    detail_buf[@min(detail.len, detail_buf.len - 1)] = 0;
+    return @ptrCast(detail_buf[0.. :0].ptr);
+}
+
+/// Only consulted when `cuGetErrorString` itself fails. Covers the codes
+/// worth recognising before a working driver is established.
+fn fallbackName(err: Error) []const u8 {
+    return switch (err) {
+        3 => "CUDA_ERROR_NOT_INITIALIZED",
+        // What libcuda.so from a CUDA *toolkit* returns, as opposed to the
+        // driver's. Usually LD_LIBRARY_PATH or RUNPATH pointing into a
+        // toolkit's lib/stubs directory.
+        34 => "CUDA_ERROR_STUB_LIBRARY -- a stub libcuda was loaded instead of the driver's",
+        100 => "CUDA_ERROR_NO_DEVICE -- no CUDA-capable GPU visible",
+        101 => "CUDA_ERROR_INVALID_DEVICE",
+        218 => "CUDA_ERROR_INVALID_PTX -- the .ptx is corrupt or built by a newer toolkit than the driver knows",
+        222 => "CUDA_ERROR_UNSUPPORTED_PTX_VERSION -- driver older than the PTX; lower -Dcuda-arch or update the driver",
+        999 => "CUDA_ERROR_UNKNOWN",
+        else => "unrecognised CUresult",
+    };
+}
+
+fn loadDriver() Error {
+    if (loaded) return success;
+
+    var handle: ?*anyopaque = null;
+    for (candidates) |path| {
+        handle = std.c.dlopen(path.ptr, .{ .NOW = true });
+        if (handle != null) break;
+    }
+    const h = handle orelse {
+        setDetail(
+            "could not load libcuda.so.1 (tried the loader path, /run/opengl-driver/lib, " ++
+                "/usr/lib/x86_64-linux-gnu, /usr/lib64, /usr/lib). " ++
+                "It ships with the NVIDIA driver, not the CUDA toolkit",
+            .{},
+        );
+        return load_failed;
+    };
+
+    inline for (@typeInfo(Driver).@"struct".fields) |f| {
+        const sym = std.c.dlsym(h, f.name ++ "") orelse {
+            setDetail("libcuda.so.1 has no symbol {s}; driver is too old", .{f.name});
+            return symbol_missing;
+        };
+        @field(driver, f.name) = @ptrCast(@alignCast(sym));
+    }
+
+    loaded = true;
+    return success;
 }
 
 /// The driver API, unlike the runtime API, must be initialised explicitly
 /// before any other call.
 pub fn initPlatform() Error {
-    return cuInit(0);
+    const err = loadDriver();
+    if (err != success) return err;
+    return driver.cuInit(0);
 }
 
 pub fn deviceCount(out: *c_int) Error {
-    return cuDeviceGetCount(out);
+    return driver.cuDeviceGetCount(out);
 }
 
 /// There is no `cuSetDevice`. The equivalent is to retain the device's
@@ -110,64 +213,68 @@ pub fn deviceCount(out: *c_int) Error {
 /// it current on this thread.
 pub fn setDevice(index: c_int) Error {
     var dev: Device = 0;
-    var err = cuDeviceGet(&dev, index);
+    var err = driver.cuDeviceGet(&dev, index);
     if (err != success) return err;
 
     var ctx: Context = null;
-    err = cuDevicePrimaryCtxRetain(&ctx, dev);
+    err = driver.cuDevicePrimaryCtxRetain(&ctx, dev);
     if (err != success) return err;
 
-    return cuCtxSetCurrent(ctx);
+    return driver.cuCtxSetCurrent(ctx);
 }
 
 pub fn deviceName(index: c_int, buf: []u8) void {
     var dev: Device = 0;
-    if (cuDeviceGet(&dev, index) != success) return;
-    _ = cuDeviceGetName(buf.ptr, @intCast(buf.len - 1), dev);
+    if (driver.cuDeviceGet(&dev, index) != success) return;
+    _ = driver.cuDeviceGetName(buf.ptr, @intCast(buf.len - 1), dev);
 }
 
 pub fn memInfo(free_out: *usize, total_out: *usize) Error {
-    return cuMemGetInfo_v2(free_out, total_out);
+    return driver.cuMemGetInfo_v2(free_out, total_out);
+}
+
+inline fn toDevicePtr(p: ?*anyopaque) DevicePtr {
+    return @intCast(@intFromPtr(p));
 }
 
 pub fn malloc(out: *?*anyopaque, bytes: usize) Error {
     var dptr: DevicePtr = 0;
-    const err = cuMemAlloc_v2(&dptr, bytes);
+    const err = driver.cuMemAlloc_v2(&dptr, bytes);
     if (err != success) return err;
     out.* = @ptrFromInt(@as(usize, @intCast(dptr)));
     return success;
 }
 
 pub fn free(p: ?*anyopaque) Error {
-    return cuMemFree_v2(toDevicePtr(p));
+    return driver.cuMemFree_v2(toDevicePtr(p));
 }
 
 pub fn memsetZero(p: ?*anyopaque, bytes: usize) Error {
-    return cuMemsetD8_v2(toDevicePtr(p), 0, bytes);
+    return driver.cuMemsetD8_v2(toDevicePtr(p), 0, bytes);
 }
 
 pub fn copyToDevice(dst: ?*anyopaque, src: *const anyopaque, bytes: usize) Error {
-    return cuMemcpyHtoD_v2(toDevicePtr(dst), src, bytes);
+    return driver.cuMemcpyHtoD_v2(toDevicePtr(dst), src, bytes);
 }
 
 pub fn copyToHost(dst: *anyopaque, src: ?*anyopaque, bytes: usize) Error {
-    return cuMemcpyDtoH_v2(dst, toDevicePtr(src), bytes);
+    return driver.cuMemcpyDtoH_v2(dst, toDevicePtr(src), bytes);
 }
 
 pub fn synchronize() Error {
-    return cuCtxSynchronize();
+    return driver.cuCtxSynchronize();
 }
 
 pub fn moduleLoad(m: *Module, path: [*:0]const u8) Error {
-    return cuModuleLoad(m, path);
+    return driver.cuModuleLoad(m, path);
 }
 
 pub fn moduleUnload(m: Module) Error {
-    return cuModuleUnload(m);
+    return driver.cuModuleUnload(m);
 }
 
 pub fn moduleGetFunction(f: *Function, m: Module, name: [*:0]const u8) Error {
-    return cuModuleGetFunction(f, m, name);
+    return driver.cuModuleGetFunction(f, m, name);
 }
 
 pub fn launchKernel(
@@ -181,5 +288,5 @@ pub fn launchKernel(
     shared_bytes: c_uint,
     params: ?[*]?*anyopaque,
 ) Error {
-    return cuLaunchKernel(f, gx, gy, gz, bx, by, bz, shared_bytes, null, params, null);
+    return driver.cuLaunchKernel(f, gx, gy, gz, bx, by, bz, shared_bytes, null, params, null);
 }
