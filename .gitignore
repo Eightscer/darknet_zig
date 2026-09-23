@@ -4,3 +4,4 @@ backup/
 *.weights
 *.backup
 *.hsaco
+.cuda-toolkit/

@@ -75,6 +75,12 @@ A CUDA-backend binary links against `libcuda.so.1`, which comes from the NVIDIA
 library is resolved at load, so the build machine needs no NVIDIA GPU -- but a
 machine with no driver cannot start the binary at all.
 
+`-Dcuda-path` must point at a directory laid out like a CUDA toolkit:
+`bin/nvcc`, `include/cuda_runtime.h` and a `libcuda.so` stub under `lib/stubs`
+(or `lib64/stubs`; the build probes). A distro CUDA install already looks like
+that. On NixOS the pieces live in separate store paths, so the `cuda` dev shell
+joins them into one root and exports it as `$CUDA_PATH`.
+
 ## Running
 
 ```sh
