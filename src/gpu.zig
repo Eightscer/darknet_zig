@@ -215,14 +215,31 @@ pub fn init(allocator: std.mem.Allocator, index: i32) !void {
     const path = try findCodeObject(allocator);
     defer allocator.free(path);
     check(api.moduleLoad(&module, path.ptr), "loading the device code object") catch {
-        std.debug.print(
-            \\Failed to load device code from: {s}
-            \\On AMD the .hsaco must match the GPU architecture: check
-            \\`rocminfo | grep gfx` and rebuild with -Doffload-arch=<that>.
-            \\On NVIDIA the .ptx is JIT-compiled, so a failure here usually means
-            \\the file is missing or the driver is older than the PTX version.
-            \\
-        , .{path});
+        std.debug.print("Failed to load device code from: {s}\n", .{path});
+        if (build_options.cuda) {
+            std.debug.print(
+                \\
+                \\If that said the PTX JIT compiler library was not found: loading
+                \\PTX makes the driver look for libnvidia-ptxjitcompiler.so.1, which
+                \\ships with the driver but is missing from some container images.
+                \\Either expose it (it lives beside libcuda.so.1), or sidestep the
+                \\JIT altogether by compiling the kernels for your exact GPU:
+                \\
+                \\    nvidia-smi --query-gpu=compute_cap --format=csv,noheader
+                \\    # e.g. 8.6 ->
+                \\    zig build -Doptimize=ReleaseFast -Dgpu=true -Dgpu-backend=cuda \
+                \\              -Dcuda-path=$CUDA_PATH -Dcuda-arch=sm_86
+                \\
+                \\An sm_XX arch emits a cubin, which the driver loads directly.
+                \\
+            , .{});
+        } else {
+            std.debug.print(
+                \\The .hsaco must match the GPU architecture: check
+                \\`rocminfo | grep gfx` and rebuild with -Doffload-arch=<that>.
+                \\
+            , .{});
+        }
         return error.CodeObjectLoadFailed;
     };
 

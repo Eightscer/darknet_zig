@@ -440,6 +440,34 @@ PTX rather than a cubin, so the driver JIT-compiles on load and one artifact
 runs on any architecture at or above `-Dcuda-arch`. That is strictly nicer than
 the AMD side, where `--offload-arch` has to name every ISA up front.
 
+### The PTX JIT trap
+
+Loading PTX makes the driver `dlopen` `libnvidia-ptxjitcompiler.so.1` by bare
+soname. That file ships with the driver, but it is missing from some container
+images, and on systems where libcuda lives off the default loader path
+(NixOS's `/run/opengl-driver/lib`, partially bind-mounted containers) the
+second lookup fails even with the file sitting next to libcuda. `cuModuleLoad`
+then returns `CUDA_ERROR_JIT_COMPILER_NOT_FOUND`.
+
+Two mitigations, in order:
+
+1. The backend preloads the JIT compiler itself, looking first beside
+   whichever libcuda actually loaded, so the driver's own `dlopen` finds it
+   already resident. Best effort and silent when it fails.
+2. If the library genuinely is not on the machine, skip the JIT entirely by
+   building a cubin for your exact GPU:
+
+   ```sh
+   nvidia-smi --query-gpu=compute_cap --format=csv,noheader   # e.g. 8.6
+   zig build -Doptimize=ReleaseFast -Dgpu=true -Dgpu-backend=cuda \\
+             -Dcuda-path=$CUDA_PATH -Dcuda-arch=sm_86
+   ```
+
+   A `sm_XX` value for `-Dcuda-arch` emits `darknet_kernels.cubin` (real SASS,
+   loaded directly) instead of `darknet_kernels.ptx`. It only runs on that
+   architecture, which is exactly the trade PTX exists to avoid -- but it
+   needs nothing from the driver beyond the loader.
+
 ### The stub library trap
 
 `libcuda.so` exists in two forms, with the same soname:

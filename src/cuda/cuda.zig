@@ -35,12 +35,17 @@
 //! This file implements the interface documented at the top of ../gpu.zig.
 
 const std = @import("std");
+const build_options = @import("build_options");
 
 pub const label = "CUDA";
-/// PTX rather than a cubin: the driver JIT-compiles it on load, so one
-/// artifact runs on any architecture at or above the one it was built for,
-/// and there is no per-GPU build matrix to maintain.
-pub const code_object_file = "darknet_kernels.ptx";
+/// PTX by default: the driver JIT-compiles it on load, so one artifact runs
+/// on any architecture at or above the one it was built for, and there is no
+/// per-GPU build matrix to maintain. `-Dcuda-arch=sm_XX` instead produces a
+/// cubin, which skips the JIT entirely -- see `loadJitCompiler` below.
+pub const code_object_file = if (build_options.cuda_cubin)
+    "darknet_kernels.cubin"
+else
+    "darknet_kernels.ptx";
 
 /// CUresult. CUDA_SUCCESS is 0, same as hipSuccess.
 pub const Error = c_int;
@@ -170,9 +175,13 @@ fn loadDriver() Error {
     if (loaded) return success;
 
     var handle: ?*anyopaque = null;
+    var loaded_from: []const u8 = "";
     for (candidates) |path| {
         handle = std.c.dlopen(path.ptr, .{ .NOW = true });
-        if (handle != null) break;
+        if (handle != null) {
+            loaded_from = path;
+            break;
+        }
     }
     const h = handle orelse {
         setDetail(
@@ -192,8 +201,46 @@ fn loadDriver() Error {
         @field(driver, f.name) = @ptrCast(@alignCast(sym));
     }
 
+    loadJitCompiler(loaded_from);
     loaded = true;
     return success;
+}
+
+/// Pull `libnvidia-ptxjitcompiler.so.1` into the process, best effort.
+///
+/// Loading PTX makes the driver dlopen this itself, by bare soname. When
+/// libcuda was found somewhere the default loader path does not cover -- a
+/// container that bind-mounts only part of the driver, or NixOS's
+/// /run/opengl-driver/lib -- that second lookup fails even though the file is
+/// sitting next to libcuda, and `cuModuleLoad` returns
+/// CUDA_ERROR_JIT_COMPILER_NOT_FOUND. Loading it here first means the driver's
+/// dlopen finds it already resident and succeeds.
+///
+/// Irrelevant when the kernels were built as a cubin (`-Dcuda-arch=sm_XX`),
+/// since nothing is JIT-compiled then, but harmless.
+fn loadJitCompiler(cuda_lib_path: []const u8) void {
+    const soname = "libnvidia-ptxjitcompiler.so.1";
+    const flags: std.c.RTLD = .{ .NOW = true, .GLOBAL = true };
+
+    // Next to whichever libcuda actually loaded: the most likely place, and
+    // guaranteed to be the matching driver version.
+    if (std.fs.path.dirname(cuda_lib_path)) |dir| {
+        var buf: [512]u8 = undefined;
+        if (std.fmt.bufPrintZ(&buf, "{s}/{s}", .{ dir, soname })) |p| {
+            if (std.c.dlopen(p.ptr, flags) != null) return;
+        } else |_| {}
+    }
+
+    if (std.c.dlopen(soname, flags) != null) return;
+
+    for (candidates) |cand| {
+        const dir = std.fs.path.dirname(cand) orelse continue;
+        var buf: [512]u8 = undefined;
+        const p = std.fmt.bufPrintZ(&buf, "{s}/{s}", .{ dir, soname }) catch continue;
+        if (std.c.dlopen(p.ptr, flags) != null) return;
+    }
+    // Not found. Say nothing here: a cubin build does not need it, and if a
+    // PTX build does, cuModuleLoad reports it with better context.
 }
 
 /// The driver API, unlike the runtime API, must be initialised explicitly

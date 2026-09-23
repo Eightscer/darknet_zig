@@ -29,16 +29,22 @@ pub fn build(b: *std.Build) void {
         "AMD GPU target(s), comma separated, e.g. gfx1030,gfx1100",
     ) orelse "gfx1030";
 
-    // The NVIDIA side needs no equivalent list. We emit PTX, which the driver
-    // JIT-compiles on load, so one artifact runs on any GPU at or above this
-    // virtual architecture. compute_52 (Maxwell) is about as low as CUDA 12
-    // still accepts; raise it if you want to drop the deprecation warning or
-    // use newer PTX features.
+    // The NVIDIA side needs no equivalent list. A `compute_XX` value emits
+    // PTX, which the driver JIT-compiles on load, so one artifact runs on any
+    // GPU at or above that virtual architecture. compute_52 (Maxwell) is
+    // about as low as CUDA 12 still accepts.
+    //
+    // An `sm_XX` value instead emits a cubin: real SASS for exactly that
+    // architecture, loaded without any JIT. Less portable, but it is the way
+    // out when the driver cannot find libnvidia-ptxjitcompiler.so.1 -- see
+    // the note on that in the README.
     const cuda_arch = b.option(
         []const u8,
         "cuda-arch",
-        "NVIDIA virtual architecture for the PTX, e.g. compute_52",
+        "NVIDIA arch: compute_XX emits portable PTX (default), sm_XX emits a JIT-free cubin",
     ) orelse "compute_52";
+    // sm_XX means "build SASS for this exact GPU"; compute_XX means PTX.
+    const cuda_cubin = std.mem.startsWith(u8, cuda_arch, "sm_");
 
     // Passed in from the shell rather than read inside build.zig: the exact
     // std.Build API for reading environment variables keeps moving between
@@ -50,6 +56,7 @@ pub fn build(b: *std.Build) void {
     const options = b.addOptions();
     options.addOption(bool, "gpu", gpu);
     options.addOption(bool, "cuda", cuda);
+    options.addOption(bool, "cuda_cubin", cuda_cubin);
 
     // -------------------------------------------------------------------
     // The library module: everything except the CLI entry point
@@ -100,12 +107,13 @@ pub fn build(b: *std.Build) void {
     // loads at runtime. One source file serves both; see its header. This is
     // the entire C++ surface of the project.
     if (gpu) {
+        const cuda_object_name = if (cuda_cubin) "darknet_kernels.cubin" else "darknet_kernels.ptx";
+
         const object: std.Build.LazyPath = if (cuda) blk: {
-            // -x cu because the file is named .hip. PTX rather than a cubin,
-            // so the result is architecture-independent.
+            // -x cu because the file is named .hip.
             const nvcc = b.addSystemCommand(&.{b.fmt("{s}/bin/nvcc", .{cuda_path})});
             nvcc.addArgs(&.{
-                "-ptx",
+                if (cuda_cubin) "-cubin" else "-ptx",
                 "-x",  "cu",
                 "-O3", b.fmt("-arch={s}", .{cuda_arch}),
                 "-Wno-deprecated-gpu-targets",
@@ -115,9 +123,9 @@ pub fn build(b: *std.Build) void {
                 b.fmt("-I{s}/include", .{cuda_path}),
                 "-o",
             });
-            const ptx = nvcc.addOutputFileArg("darknet_kernels.ptx");
+            const out = nvcc.addOutputFileArg(cuda_object_name);
             nvcc.addFileArg(b.path("src/kernels/darknet_kernels.hip"));
-            break :blk ptx;
+            break :blk out;
         } else blk: {
             const hipcc = b.addSystemCommand(&.{"hipcc"});
             var it = std.mem.tokenizeScalar(u8, offload_arch, ',');
@@ -130,7 +138,7 @@ pub fn build(b: *std.Build) void {
             break :blk hsaco;
         };
 
-        const object_name = if (cuda) "darknet_kernels.ptx" else "darknet_kernels.hsaco";
+        const object_name = if (cuda) cuda_object_name else "darknet_kernels.hsaco";
         const install_object = b.addInstallFileWithDir(object, .bin, object_name);
         b.getInstallStep().dependOn(&install_object.step);
 
