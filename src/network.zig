@@ -99,6 +99,8 @@ pub const Network = struct {
     aspect: f32 = 1,
     exposure: f32 = 1,
     saturation: f32 = 1,
+    /// Random horizontal mirroring in the loader; darknet defaults this on.
+    flip: bool = true,
     hue: f32 = 0,
     random: bool = false,
 

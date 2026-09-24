@@ -1,0 +1,2 @@
+# The datasets themselves: ~4.5 GB with COCO. Regenerate with ./get-data.sh.
+data/

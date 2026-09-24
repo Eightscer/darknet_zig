@@ -34,6 +34,7 @@ fn loaderArgs(net: *Network, paths: []const []const u8, labels: []const []const 
         .max = @intFromFloat(net.max_ratio * fw),
         .angle = net.angle,
         .aspect = net.aspect,
+        .flip = net.flip,
         .hue = net.hue,
         .saturation = net.saturation,
         .exposure = net.exposure,

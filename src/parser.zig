@@ -82,6 +82,7 @@ fn parseNetOptions(allocator: std.mem.Allocator, o: *Options, net: *Network) !vo
     net.aspect = o.floatQuiet("aspect", 1);
     net.saturation = o.floatQuiet("saturation", 1);
     net.exposure = o.floatQuiet("exposure", 1);
+    net.flip = o.boolQuiet("flip", true);
     net.hue = o.floatQuiet("hue", 0);
 
     if (net.inputs == 0 and !(net.h != 0 and net.w != 0 and net.c != 0)) {

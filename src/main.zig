@@ -16,6 +16,7 @@ const utils = @import("utils.zig");
 const gpu = @import("gpu.zig");
 const classifier = @import("classifier.zig");
 const gputest = @import("gputest.zig");
+const benchmark = @import("benchmark.zig");
 
 const usage =
     \\darknet-zig -- neural networks in Zig, with AMD (HIP) and NVIDIA (CUDA) backends
@@ -24,6 +25,7 @@ const usage =
     \\  darknet-zig classifier train   <data.cfg> <net.cfg> [weights] [options]
     \\  darknet-zig classifier valid   <data.cfg> <net.cfg> <weights>  [options]
     \\  darknet-zig classifier predict <data.cfg> <net.cfg> <weights> <image> [options]
+    \\  darknet-zig benchmark      <data.cfg> <net.cfg> [options]
     \\  darknet-zig gputest [options]
     \\
     \\Options:
@@ -32,6 +34,12 @@ const usage =
     \\  -threads <n>     Image loader worker tasks (default: 8)
     \\  -top <k>         Report the k highest-scoring classes (default: from data.cfg)
     \\  -clear           Reset the seen-images counter when resuming from weights
+    \\
+    \\benchmark options:
+    \\  -train-batches N Batches to time (default 100; 0 skips training)
+    \\  -infer-images N  Validation images to time (default: all)
+    \\  -warmup N        Untimed batches before the clock starts (default 3)
+    \\  -save-weights W  Keep the trained weights at this path
     \\
 ;
 
@@ -45,6 +53,10 @@ const Args = struct {
     threads: usize = 8,
     top: usize = 0,
     clear: bool = false,
+    train_batches: usize = 100,
+    infer_images: usize = 0,
+    warmup: usize = 3,
+    save_weights: ?[]const u8 = null,
 
     fn parse(allocator: std.mem.Allocator, argv: []const []const u8) !Args {
         var positional: std.ArrayList([]const u8) = .empty;
@@ -68,6 +80,22 @@ const Args = struct {
                 i += 1;
                 if (i >= argv.len) return error.MissingArgument;
                 self.threads = @intCast(@max(1, utils.parseInt(argv[i], 8)));
+            } else if (std.mem.eql(u8, a, "-train-batches")) {
+                i += 1;
+                if (i >= argv.len) return error.MissingArgument;
+                self.train_batches = @intCast(@max(0, utils.parseInt(argv[i], 100)));
+            } else if (std.mem.eql(u8, a, "-infer-images")) {
+                i += 1;
+                if (i >= argv.len) return error.MissingArgument;
+                self.infer_images = @intCast(@max(0, utils.parseInt(argv[i], 0)));
+            } else if (std.mem.eql(u8, a, "-warmup")) {
+                i += 1;
+                if (i >= argv.len) return error.MissingArgument;
+                self.warmup = @intCast(@max(0, utils.parseInt(argv[i], 3)));
+            } else if (std.mem.eql(u8, a, "-save-weights")) {
+                i += 1;
+                if (i >= argv.len) return error.MissingArgument;
+                self.save_weights = argv[i];
             } else if (std.mem.eql(u8, a, "-top")) {
                 i += 1;
                 if (i >= argv.len) return error.MissingArgument;
@@ -147,6 +175,22 @@ fn run(init: std.process.Init) !void {
 
     const command = args.positional[0];
     const rest = args.positional[1..];
+
+    if (std.mem.eql(u8, command, "benchmark")) {
+        if (rest.len != 2) {
+            std.debug.print("benchmark takes <data.cfg> <net.cfg>; got {d} argument(s)\n", .{rest.len});
+            return error.WrongArgumentCount;
+        }
+        return benchmark.run(allocator, .{
+            .data_cfg = rest[0],
+            .net_cfg = rest[1],
+            .train_batches = args.train_batches,
+            .infer_images = args.infer_images,
+            .warmup_batches = args.warmup,
+            .threads = args.threads,
+            .save_to = args.save_weights,
+        });
+    }
 
     if (std.mem.eql(u8, command, "gputest")) {
         return gputest.run(allocator);

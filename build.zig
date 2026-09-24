@@ -149,6 +149,28 @@ pub fn build(b: *std.Build) void {
     }
 
     // -------------------------------------------------------------------
+    // benchmark dataset converter
+    // -------------------------------------------------------------------
+    // Behind its own step rather than the default install: it is only needed
+    // once per machine, and it recompiles stb_image.
+    const prepare = b.addExecutable(.{
+        .name = "bench-prepare",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/prepare.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        }),
+    });
+    prepare.root_module.addIncludePath(b.path("src/c"));
+    prepare.root_module.addCSourceFile(.{
+        .file = b.path("src/c/stb_impl.c"),
+        .flags = &.{ "-std=c99", "-O2", "-fno-sanitize=undefined" },
+    });
+    const prepare_step = b.step("bench-prepare", "Build the benchmark dataset converter");
+    prepare_step.dependOn(&b.addInstallArtifact(prepare, .{}).step);
+
+    // -------------------------------------------------------------------
     // run / test
     // -------------------------------------------------------------------
     const run = b.addRunArtifact(exe);

@@ -96,6 +96,9 @@ darknet-zig classifier predict cfg/imagenet1k.data cfg/tiny.cfg tiny.weights dog
 
 # CPU-vs-GPU kernel comparison
 darknet-zig gputest -gpu 0
+
+# timed training + inference + accuracy, machine-readable
+darknet-zig benchmark my.data cfg/cifar.cfg -train-batches 1000 [-gpu 0]
 ```
 
 Flags: `-gpu <index>`, `-seed <n>`, `-threads <n>` (loader workers), `-top <k>`,
@@ -115,6 +118,18 @@ backup  = /data/mine/backup
 top     = 2
 ```
 
+`labels` is what assigns the class (substring match against the path);
+`names` is only displayed, so the two can differ — `bench/prepare.zig` uses
+that to write unambiguous labels for datasets whose class names overlap.
+
+For a ready-made comparison across CPU and GPU on MNIST, CIFAR-10 and COCO,
+see [`bench/README.md`](bench/README.md):
+
+```sh
+./bench/get-data.sh mnist cifar10
+./bench/benchmark.sh --platforms cpu,gpu --datasets mnist,cifar10
+```
+
 ## Trying it on a CPU
 
 Three checks, in increasing order of cost.
@@ -125,7 +140,7 @@ Three checks, in increasing order of cost.
 zig build test
 ```
 
-19 tests. The load-bearing ones are a finite-difference check of the analytic
+20 tests. The load-bearing ones are a finite-difference check of the analytic
 gradients, a weights round-trip through the binary format, and a small network
 learning a separable task.
 
@@ -298,9 +313,12 @@ src/
   kernels/*.hip       device kernels -- the only C++ in the project
   c/                  stb_image, the only host C
   smoke_test.zig      end-to-end tests
+  benchmark.zig       the `benchmark` subcommand: timed training + inference
 examples/
   make_shapes.zig     generates the circle-vs-square dataset
   tiny-shapes.cfg     tiny.cfg's topology, retargeted at that dataset
+bench/
+  see bench/README.md -- benchmark suite over MNIST, CIFAR-10 and COCO
 ```
 
 ## Notes on the port
@@ -340,6 +358,13 @@ own seeded instance, and `-seed` makes a run repeatable.
 `normalize` divides by `sqrt(v) + 1e-6` on the CPU and `sqrt(v + 1e-5)` on the
 GPU. Both backends here use the CPU form, so `gputest` can hold them to the same
 standard. The difference is far below single precision either way.
+
+**`[net] flip` is honoured.** Upstream reads a `flip` option (default 1) in the
+net section and passes it to the loader, which mirrors each training crop with
+probability a half. An early version of this port hardcoded the mirroring, and
+it went unnoticed until the benchmark suite trained on MNIST and stalled at 80%
+top-1: a mirrored digit is not that digit, so half the training signal was
+wrong. Setting `flip=0` in the config now works as it does upstream.
 
 Two darknet quirks *are* reproduced on purpose, because augmentation and weight
 layout have to match upstream: `random_augment_args` measures vertical slack

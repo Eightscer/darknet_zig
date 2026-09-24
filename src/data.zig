@@ -91,6 +91,11 @@ pub const LoadArgs = struct {
     hue: f32 = 0,
     saturation: f32 = 1,
     exposure: f32 = 1,
+    /// Random horizontal mirroring. Upstream darknet's `[net] flip`, which
+    /// defaults on because it is the right call for natural images -- but it
+    /// is actively wrong wherever left and right mean different things, and a
+    /// mirrored digit is not that digit. Turn it off with `flip=0`.
+    flip: bool = true,
     /// Deterministic centre crop instead of random augmentation.
     center: bool = false,
     /// Sample uniformly at random rather than walking `paths` in order.
@@ -139,7 +144,7 @@ fn loadOne(
     errdefer cropped.deinit(allocator);
 
     if (!a.center) {
-        if (rng.boolean()) image.flip(cropped);
+        if (a.flip and rng.boolean()) image.flip(cropped);
         image.randomDistort(rng, cropped, a.hue, a.saturation, a.exposure);
     }
 
