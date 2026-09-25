@@ -60,6 +60,8 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !void {
     defer allocator.free(base);
 
     emit("backend", "{s}", .{if (gpu.active()) gpu.backend_label else "CPU"});
+    emit("device", "{s}", .{gpu.deviceName()});
+    emit("device_memory_mib", "{d}", .{gpu.deviceMemoryMib()});
     emit("net", "{s}", .{base});
     emit("classes", "{d}", .{classes});
 

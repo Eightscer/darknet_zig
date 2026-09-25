@@ -86,6 +86,20 @@ pub const Buf = struct {
 
 /// -1 means "run on the CPU". Set by main from the -gpu flag.
 pub var device_index: i32 = -1;
+/// Set by `init`, so a run can record which device produced its numbers.
+var device_name_buf: [256]u8 = @splat(0);
+var device_total_mib: usize = 0;
+
+/// The selected device's name, or "CPU" when no device is active.
+pub fn deviceName() []const u8 {
+    if (!active()) return "CPU";
+    return std.mem.sliceTo(&device_name_buf, 0);
+}
+
+/// Total VRAM on the selected device, in MiB; 0 when running on the CPU.
+pub fn deviceMemoryMib() usize {
+    return if (active()) device_total_mib else 0;
+}
 
 pub fn active() bool {
     return enabled and device_index >= 0;
@@ -209,8 +223,8 @@ pub fn init(allocator: std.mem.Allocator, index: i32) !void {
     }
     try check(api.setDevice(index), "selecting the device");
 
-    var name: [256]u8 = @splat(0);
-    api.deviceName(index, &name);
+    const name: *[256]u8 = &device_name_buf;
+    api.deviceName(index, name);
 
     const path = try findCodeObject(allocator);
     defer allocator.free(path);
@@ -263,10 +277,11 @@ pub fn init(allocator: std.mem.Allocator, index: i32) !void {
     var free_mem: usize = 0;
     var total_mem: usize = 0;
     _ = api.memInfo(&free_mem, &total_mem);
+    device_total_mib = total_mem >> 20;
     std.debug.print("{s} device {d}: {s} ({d} MiB free / {d} MiB total)\n", .{
         api.label,
         index,
-        std.mem.sliceTo(&name, 0),
+        std.mem.sliceTo(name, 0),
         free_mem >> 20,
         total_mem >> 20,
     });

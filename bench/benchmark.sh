@@ -12,6 +12,7 @@
 #     --tag NAME             label for the results file (default: hostname)
 #     --out DIR              results directory (default bench/results)
 #     --from-raw             re-render the tables from raw/, running nothing
+#     --append               add to an existing csv instead of replacing it
 #
 # Writes <out>/<tag>.csv and <out>/<tag>.md, and keeps the raw key=value output
 # of every run in <out>/raw/.
@@ -36,6 +37,9 @@ out="$here/results"
 # Re-render the tables from raw/ without re-running anything, for when the
 # report format changes and the measurements have not.
 from_raw=0
+# Add to an existing csv rather than starting a new one, so several
+# invocations on one machine land in a single table.
+append=0
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -47,6 +51,7 @@ while [ $# -gt 0 ]; do
         --tag)           tag="$2"; shift 2 ;;
         --out)           out="$2"; shift 2 ;;
         --from-raw)      from_raw=1; shift ;;
+        --append)        append=1; shift ;;
         -h|--help)       sed -n '2,20p' "$0"; exit 0 ;;
         *) echo "unknown option: $1"; exit 1 ;;
     esac
@@ -58,10 +63,20 @@ mkdir -p "$out/raw"
 csv="$out/$tag.csv"
 md="$out/$tag.md"
 
-echo "platform,dataset,classes,train_img_per_s,train_final_loss,infer_img_per_s,infer_e2e_img_per_s,top1,top5,majority_baseline" > "$csv"
+header="platform,dataset,device,classes,train_img_per_s,train_final_loss,infer_img_per_s,infer_e2e_img_per_s,top1,top5,majority_baseline"
+if [ "$append" = 1 ] && [ -s "$csv" ]; then
+    echo "appending to $csv"
+else
+    echo "$header" > "$csv"
+fi
 
 # Pull one key out of a key=value block.
 val() { grep -m1 "^$2=" "$1" | cut -d= -f2- || true; }
+
+# Same, but with a fallback for keys that older recorded runs predate.
+vald() {  # vald <file> <key> <default>
+    local v; v=$(val "$1" "$2"); echo "${v:-$3}"
+}
 
 # The share of the validation set belonging to its single most common class --
 # what you would score by always guessing that class. Without it a top-1 is
@@ -107,8 +122,9 @@ for platform in ${platforms//,/ }; do
                 > "$raw" 2> "$raw.log" || { echo "  FAILED -- see $raw.log"; tail -5 "$raw.log"; continue; }
         fi
         cat "$raw" | sed 's/^/  /'
-        printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
+        printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
             "$platform" "$ds" \
+            "$(vald "$raw" device CPU)" \
             "$(val "$raw" classes)" \
             "$(val "$raw" train_images_per_sec)" \
             "$(val "$raw" train_final_loss)" \
@@ -129,9 +145,9 @@ done
     echo "- cpu: $(grep -m1 'model name' /proc/cpuinfo 2>/dev/null | cut -d: -f2- | sed 's/^ //' || echo unknown)"
     echo "- timed training batches: $train_batches"
     echo
-    echo "| platform | dataset | classes | train img/s | final loss | infer img/s | infer img/s (with decode) | top-1 | top-5 | majority-class baseline |"
-    echo "|---|---|---|---|---|---|---|---|---|---|"
-    tail -n +2 "$csv" | awk -F, '{printf "| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n",$1,$2,$3,$4,$5,$6,$7,$8,$9,$10}'
+    echo "| platform | dataset | device | classes | train img/s | final loss | infer img/s | infer img/s (with decode) | top-1 | top-5 | majority-class baseline |"
+    echo "|---|---|---|---|---|---|---|---|---|---|---|"
+    tail -n +2 "$csv" | awk -F, '{printf "| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n",$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11}'
     echo
     echo "\`infer img/s\` is the network forward pass alone; the next column"
     echo "includes JPEG/PNG decode and centre-cropping, which is what an"
