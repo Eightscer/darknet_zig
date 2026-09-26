@@ -1,0 +1,7 @@
+platform,dataset,device,classes,batches,train_img_per_s,train_final_loss,infer_img_per_s,infer_e2e_img_per_s,top1,top5,majority_baseline
+gpu,cifar10-fullb16,NVIDIA GeForce RTX 3060 Ti,10,200,203.3,2.0166,582.3,564.0,0.2652,0.8039,0.1000
+gpu,cifar10-fullb32,NVIDIA GeForce RTX 3060 Ti,10,200,204.9,1.7293,585.6,569.3,0.3417,0.8587,0.1000
+gpu,cifar10-fullb64,NVIDIA GeForce RTX 3060 Ti,10,200,207.0,1.7624,583.9,569.3,0.2479,0.8026,0.1000
+gpu,cifar10-fullb16,NVIDIA GeForce RTX 3060 Ti,10,200,205.6,2.0166,586.4,479.7,0.2652,0.8039,0.1000
+gpu,cifar10-fullb32,NVIDIA GeForce RTX 3060 Ti,10,200,205.1,1.7293,584.8,496.8,0.3417,0.8587,0.1000
+gpu,cifar10-fullb64,NVIDIA GeForce RTX 3060 Ti,10,200,205.5,1.7624,583.0,479.8,0.2479,0.8026,0.1000
