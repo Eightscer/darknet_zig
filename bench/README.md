@@ -205,8 +205,23 @@ the images/second figures settle within a few batches of the warmup.
 
 ## Recorded results
 
-`results/laptop-cpu.md` is the run above. Two things in it are worth reading
-carefully rather than at a glance:
+Results live in `results/<machine>/<tag>.md`, with the raw key=value
+records kept alongside in `raw/` so any table can be re-rendered with
+`--from-raw` without re-running anything. Three machines have been
+measured so far:
+
+| directory | CPU | GPU | backend |
+|---|---|---|---|
+| `results/` | Core i7-1185G7 | -- | CPU only |
+| `results/rx6650xt/` | Ryzen 7 5700G | Radeon RX 6650 XT (gfx1032) | HIP |
+| `results/rtx3060ti/` | Xeon E5-1680 v3 | GeForce RTX 3060 Ti | CUDA |
+
+**[`REPORT.md`](REPORT.md) is the full CPU vs HIP vs CUDA analysis** of
+those runs -- where each backend spends its time, why NVIDIA leads AMD by
+a constant 2.2x, and why the faster GPU lost the COCO end-to-end number.
+
+`results/laptop-cpu.md` is the CPU run described above. Two things in it
+are worth reading carefully rather than at a glance:
 
 **CIFAR-10 at 58.9% is an under-trained number, not a broken one.** 1000
 batches of 128 is about 2.5 passes over 50 000 images. The loss is still

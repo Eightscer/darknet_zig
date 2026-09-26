@@ -70,6 +70,28 @@ on NVIDIA. The executable looks for it next to itself;
 `zig build kernels` compiles only the device code, which is a fast syntax check
 on a machine that has the compiler but no matching card.
 
+`-Dkernel-stats=true` asks the vendor compiler to report registers per
+thread, spills and LDS/shared memory per kernel. Those bound occupancy, which
+is usually what explains GPU throughput -- see [`bench/REPORT.md`](bench/REPORT.md).
+Three caveats, all of which make a working build look like a broken one:
+
+- The numbers go to **stderr**, and Zig only replays a child process's stderr
+  when the step actually runs. A cached rebuild prints nothing, so touch
+  `src/kernels/darknet_kernels.hip` first.
+- Zig labels captured stderr `failed command` even when the command
+  succeeded. Check the exit status, not that word.
+- On NVIDIA it needs a **cubin** build: `ptxas` never runs in the default
+  PTX mode, so pair it with `-Dcuda-arch=sm_XX`. The build warns if you
+  forget.
+
+```sh
+touch src/kernels/darknet_kernels.hip
+zig build kernels -Dgpu=true -Dkernel-stats=true \
+          -Drocm-path=$ROCM_PATH -Doffload-arch=gfx1032          # AMD
+zig build kernels -Dgpu=true -Dgpu-backend=cuda -Dkernel-stats=true \
+          -Dcuda-path=$CUDA_PATH -Dcuda-arch=sm_86               # NVIDIA
+```
+
 The CUDA build links against no CUDA library at all: `libcuda.so.1` is opened
 with `dlopen` at startup. So `-Dcuda-path` is needed only to find **nvcc** and
 `cuda_runtime.h` for compiling the kernels -- it must point at a directory with
@@ -129,6 +151,10 @@ see [`bench/README.md`](bench/README.md):
 ./bench/get-data.sh mnist cifar10
 ./bench/benchmark.sh --platforms cpu,gpu --datasets mnist,cifar10
 ```
+
+Measured results for a Radeon RX 6650 XT (HIP), a GeForce RTX 3060 Ti
+(CUDA) and three CPUs, with an analysis of where each backend spends its
+time, are in [`bench/REPORT.md`](bench/REPORT.md).
 
 ## Trying it on a CPU
 
@@ -318,7 +344,8 @@ examples/
   make_shapes.zig     generates the circle-vs-square dataset
   tiny-shapes.cfg     tiny.cfg's topology, retargeted at that dataset
 bench/
-  see bench/README.md -- benchmark suite over MNIST, CIFAR-10 and COCO
+  see bench/README.md   -- benchmark suite over MNIST, CIFAR-10 and COCO
+  see bench/REPORT.md   -- CPU vs HIP vs CUDA results and analysis
 ```
 
 ## Notes on the port

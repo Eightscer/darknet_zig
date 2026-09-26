@@ -1,0 +1,29 @@
+nproc: 16
+
+============================ ROCm System Management Interface ============================
+============================== Version of System Component ===============================
+Driver version: 6.12.93
+==========================================================================================
+====================================== Product Info ======================================
+GPU[0]		: get_name, Failed to load a library
+GPU[0]		: Card Series: 		N/A
+GPU[0]		: Card Model: 		0x73ef
+GPU[0]		: Card Vendor: 		0x1002
+GPU[0]		: Card SKU: 		N/A
+GPU[0]		: Subsystem ID: 	0x6502
+GPU[0]		: Device Rev: 		0xc1
+GPU[0]		: Node ID: 		1
+GPU[0]		: GUID: 		13614
+GPU[0]		: GFX Version: 		gfx1032
+GPU[1]		: get_name, Failed to load a library
+GPU[1]		: Card Series: 		N/A
+GPU[1]		: Card Model: 		0x1638
+GPU[1]		: Card Vendor: 		0x1002
+GPU[1]		: Card SKU: 		CEZANNE
+GPU[1]		: Subsystem ID: 	0x1636
+GPU[1]		: Device Rev: 		0xc8
+GPU[1]		: Node ID: 		2
+GPU[1]		: GUID: 		26341
+GPU[1]		: GFX Version: 		gfx90c
+==========================================================================================
+================================== End of ROCm SMI Log ===================================

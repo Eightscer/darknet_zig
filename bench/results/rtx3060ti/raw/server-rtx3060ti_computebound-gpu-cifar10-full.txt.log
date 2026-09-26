@@ -1,0 +1,39 @@
+CUDA device 0: NVIDIA GeForce RTX 3060 Ti (7700 MiB free / 7841 MiB total)
+layer     filters    size              input                output
+    0 conv    128  3 x 3 / 1    28 x  28 x   3   ->    28 x  28 x 128  0.005 BFLOPs
+    1 conv    128  3 x 3 / 1    28 x  28 x 128   ->    28 x  28 x 128  0.231 BFLOPs
+    2 conv    128  3 x 3 / 1    28 x  28 x 128   ->    28 x  28 x 128  0.231 BFLOPs
+    3 max          2 x 2 / 2    28 x  28 x 128   ->    14 x  14 x 128
+    4 dropout       p = 0.50               25088  ->  25088
+    5 conv    256  3 x 3 / 1    14 x  14 x 128   ->    14 x  14 x 256  0.116 BFLOPs
+    6 conv    256  3 x 3 / 1    14 x  14 x 256   ->    14 x  14 x 256  0.231 BFLOPs
+    7 conv    256  3 x 3 / 1    14 x  14 x 256   ->    14 x  14 x 256  0.231 BFLOPs
+    8 max          2 x 2 / 2    14 x  14 x 256   ->     7 x   7 x 256
+    9 dropout       p = 0.50               12544  ->  12544
+   10 conv    512  3 x 3 / 1     7 x   7 x 256   ->     7 x   7 x 512  0.116 BFLOPs
+   11 conv    512  3 x 3 / 1     7 x   7 x 512   ->     7 x   7 x 512  0.231 BFLOPs
+   12 conv    512  3 x 3 / 1     7 x   7 x 512   ->     7 x   7 x 512  0.231 BFLOPs
+   13 dropout       p = 0.50               25088  ->  25088
+   14 conv     10  1 x 1 / 1     7 x   7 x 512   ->     7 x   7 x  10  0.001 BFLOPs
+   15 avg                        7 x   7 x  10   ->    10
+   16 softmax                                          10
+Saving weights to /root/workspace/darknet_zig/bench/data/cifar10/backup/cifar10-full-gpu.weights
+layer     filters    size              input                output
+    0 conv    128  3 x 3 / 1    28 x  28 x   3   ->    28 x  28 x 128  0.005 BFLOPs
+    1 conv    128  3 x 3 / 1    28 x  28 x 128   ->    28 x  28 x 128  0.231 BFLOPs
+    2 conv    128  3 x 3 / 1    28 x  28 x 128   ->    28 x  28 x 128  0.231 BFLOPs
+    3 max          2 x 2 / 2    28 x  28 x 128   ->    14 x  14 x 128
+    4 dropout       p = 0.50               25088  ->  25088
+    5 conv    256  3 x 3 / 1    14 x  14 x 128   ->    14 x  14 x 256  0.116 BFLOPs
+    6 conv    256  3 x 3 / 1    14 x  14 x 256   ->    14 x  14 x 256  0.231 BFLOPs
+    7 conv    256  3 x 3 / 1    14 x  14 x 256   ->    14 x  14 x 256  0.231 BFLOPs
+    8 max          2 x 2 / 2    14 x  14 x 256   ->     7 x   7 x 256
+    9 dropout       p = 0.50               12544  ->  12544
+   10 conv    512  3 x 3 / 1     7 x   7 x 256   ->     7 x   7 x 512  0.116 BFLOPs
+   11 conv    512  3 x 3 / 1     7 x   7 x 512   ->     7 x   7 x 512  0.231 BFLOPs
+   12 conv    512  3 x 3 / 1     7 x   7 x 512   ->     7 x   7 x 512  0.231 BFLOPs
+   13 dropout       p = 0.50               25088  ->  25088
+   14 conv     10  1 x 1 / 1     7 x   7 x 512   ->     7 x   7 x  10  0.001 BFLOPs
+   15 avg                        7 x   7 x  10   ->    10
+   16 softmax                                          10
+Loading weights from /root/workspace/darknet_zig/bench/data/cifar10/backup/cifar10-full-gpu.weights...Done!

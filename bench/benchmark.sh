@@ -63,7 +63,7 @@ mkdir -p "$out/raw"
 csv="$out/$tag.csv"
 md="$out/$tag.md"
 
-header="platform,dataset,device,classes,train_img_per_s,train_final_loss,infer_img_per_s,infer_e2e_img_per_s,top1,top5,majority_baseline"
+header="platform,dataset,device,classes,batches,train_img_per_s,train_final_loss,infer_img_per_s,infer_e2e_img_per_s,top1,top5,majority_baseline"
 if [ "$append" = 1 ] && [ -s "$csv" ]; then
     echo "appending to $csv"
 else
@@ -89,6 +89,18 @@ majority() {  # majority <valid.list>
     sed 's|.*/images/||; s|/[^/]*$||' "$1" | sort | uniq -c | sort -rn | head -1 \
         | awk -v t="$total" '{printf "%.4f", $1/t}'
 }
+# Provenance of the machine that produced the numbers. Written when a run
+# actually happens and read back by --from-raw, so re-rendering someone
+# else's results on this machine does not relabel them with this machine.
+meta="$out/$tag.meta"
+if ! { [ "$from_raw" = 1 ] && [ -s "$meta" ]; }; then
+    {
+        echo "date=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        echo "host=$(uname -srm)"
+        echo "cpu=$(grep -m1 'model name' /proc/cpuinfo 2>/dev/null | cut -d: -f2- | sed 's/^ //' || echo unknown)"
+    } > "$meta"
+fi
+
 for platform in ${platforms//,/ }; do
     case "$platform" in
         cpu) flags=() ;;
@@ -122,10 +134,11 @@ for platform in ${platforms//,/ }; do
                 > "$raw" 2> "$raw.log" || { echo "  FAILED -- see $raw.log"; tail -5 "$raw.log"; continue; }
         fi
         cat "$raw" | sed 's/^/  /'
-        printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
+        printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
             "$platform" "$ds" \
             "$(vald "$raw" device CPU)" \
             "$(val "$raw" classes)" \
+            "$(val "$raw" train_batches)" \
             "$(val "$raw" train_images_per_sec)" \
             "$(val "$raw" train_final_loss)" \
             "$(val "$raw" infer_forward_images_per_sec)" \
@@ -140,19 +153,20 @@ done
 {
     echo "# darknet-zig benchmark: $tag"
     echo
-    echo "- date: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    echo "- host: $(uname -srm)"
-    echo "- cpu: $(grep -m1 'model name' /proc/cpuinfo 2>/dev/null | cut -d: -f2- | sed 's/^ //' || echo unknown)"
-    echo "- timed training batches: $train_batches"
+    echo "- date: $(val "$meta" date)"
+    echo "- host: $(val "$meta" host)"
+    echo "- cpu: $(val "$meta" cpu)"
     echo
-    echo "| platform | dataset | device | classes | train img/s | final loss | infer img/s | infer img/s (with decode) | top-1 | top-5 | majority-class baseline |"
-    echo "|---|---|---|---|---|---|---|---|---|---|---|"
-    tail -n +2 "$csv" | awk -F, '{printf "| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n",$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11}'
+    echo "| platform | dataset | device | classes | batches | train img/s | final loss | infer img/s | infer img/s (with decode) | top-1 | top-5 | majority-class baseline |"
+    echo "|---|---|---|---|---|---|---|---|---|---|---|---|"
+    tail -n +2 "$csv" | awk -F, '{printf "| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n",$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12}'
     echo
     echo "\`infer img/s\` is the network forward pass alone; the next column"
     echo "includes JPEG/PNG decode and centre-cropping, which is what an"
     echo "end-to-end pipeline actually costs. The last column is what you would"
     echo "score by always guessing the validation set's most common class."
+    echo "Throughput is per-image, so it compares across rows; top-1 only"
+    echo "compares between rows that trained for the same number of batches."
 } > "$md"
 
 echo

@@ -53,6 +53,22 @@ pub fn build(b: *std.Build) void {
     const rocm_path = b.option([]const u8, "rocm-path", "Path to the ROCm/HIP install") orelse "/opt/rocm";
     const cuda_path = b.option([]const u8, "cuda-path", "Path to the CUDA toolkit install") orelse "/usr/local/cuda";
 
+    // Ask the vendor compiler to report registers per thread, spill counts and
+    // LDS/shared usage per kernel. Those numbers bound occupancy, and occupancy
+    // is what explains GPU throughput -- far more cheaply than disassembling.
+    //
+    // Two things to know before trusting a quiet build. The output goes to
+    // stderr, and a Zig Run step only replays a child's stderr when the step
+    // actually executes, so a cached rebuild prints nothing: touch the kernel
+    // source or clear .zig-cache first. And Zig labels any captured stderr
+    // `failed command` even when the command succeeded; check the exit status,
+    // not that word.
+    const kernel_stats = b.option(
+        bool,
+        "kernel-stats",
+        "Report per-kernel register/LDS usage from the vendor compiler",
+    ) orelse false;
+
     const options = b.addOptions();
     options.addOption(bool, "gpu", gpu);
     options.addOption(bool, "cuda", cuda);
@@ -112,6 +128,19 @@ pub fn build(b: *std.Build) void {
         const object: std.Build.LazyPath = if (cuda) blk: {
             // -x cu because the file is named .hip.
             const nvcc = b.addSystemCommand(&.{b.fmt("{s}/bin/nvcc", .{cuda_path})});
+            if (kernel_stats) {
+                // ptxas only runs when nvcc is asked for a cubin. In the default
+                // -ptx mode nvcc stops at PTX and never invokes it, so this flag
+                // would be silently ignored rather than reporting nothing useful.
+                if (cuda_cubin) {
+                    nvcc.addArgs(&.{ "-Xptxas", "-v" });
+                } else {
+                    std.log.warn(
+                        "-Dkernel-stats needs a cubin build; add -Dcuda-arch=sm_XX (GA104/RTX 3060 Ti is sm_86)",
+                        .{},
+                    );
+                }
+            }
             nvcc.addArgs(&.{
                 if (cuda_cubin) "-cubin" else "-ptx",
                 "-x",  "cu",
@@ -128,6 +157,8 @@ pub fn build(b: *std.Build) void {
             break :blk out;
         } else blk: {
             const hipcc = b.addSystemCommand(&.{"hipcc"});
+            // amdgcn resource usage comes out of the compiler's remark pass.
+            if (kernel_stats) hipcc.addArg("-Rpass-analysis=kernel-resource-usage");
             var it = std.mem.tokenizeScalar(u8, offload_arch, ',');
             while (it.next()) |arch| {
                 hipcc.addArg(b.fmt("--offload-arch={s}", .{arch}));
