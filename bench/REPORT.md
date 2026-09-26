@@ -30,12 +30,20 @@ in `bench/results/*/raw/` and every table here can be regenerated with
    compute-bound one: 13x (AMD) and 79x (NVIDIA) on `cifar10-full`.** The
    smaller configs understate the GPU because they do not give it enough work.
 2. **Between the two GPUs the gap is a remarkably constant 2.2x in NVIDIA's
-   favour**, across every network from 0.005 to 1.624 BFLOPs. Constant ratio
-   means the difference is architectural, not a problem-size artefact.
-3. **Both GPUs run at 4-6% of peak FP32, and the CPU at roughly 3%.** The cause
-   is the same on all three backends: the GEMM computes one output element per
-   thread (GPU) or per inner iteration (CPU), so every multiply-add needs its
-   own operand loads. This is the framework's single largest performance lever.
+   favour**, across every network from 0.005 to 1.624 BFLOPs and across an 8x
+   range of batch size. Three explanations were proposed and then measured
+   away -- occupancy, cache capacity, and code generation -- and the
+   specification sheets do not predict it either. The report can say precisely
+   what the bottleneck is and still cannot say why one card handles it 2.2x
+   better. See [Why NVIDIA is 2.2x AMD](#why-nvidia-is-22x-amd).
+3. **Both GPUs run at 4-6% of peak FP32, and the CPU at roughly 3%, for the
+   same reason on all three backends:** the GEMM computes one output element
+   per thread (GPU) or per inner iteration (CPU), so every multiply-add needs
+   its own operand loads. On the GPUs this is now verified at the instruction
+   level -- both ISAs issue exactly **two 32-bit shared-memory words per FMA**
+   -- with zero register spills and full occupancy, so the ceiling is
+   algorithmic rather than a tuning problem. Fixing it is the framework's
+   single largest performance lever.
 4. **The CPU GEMM emits no vector instructions at all** -- 41 scalar FMAs and
    zero packed ones in the compiled binary, on machines with 8-wide AVX2.
 5. **On COCO the RTX 3060 Ti system is slower end to end than the RX 6650 XT
@@ -265,7 +273,11 @@ produced packed FMAs and no speedup.
 ## Why NVIDIA is 2.2x AMD
 
 The gap exceeds what the spec sheets predict: 1.50x on FP32, 1.60x on memory
-bandwidth, against 2.2x measured. Something accounts for the remaining ~1.4x.
+bandwidth, against 2.2x measured. Two candidate explanations were proposed and
+then tested. **Both were wrong**, which is worth recording as carefully as a
+confirmation would have been.
+
+### The kernel
 
 The GPU GEMM (`gemm_kernel` in `src/kernels/darknet_kernels.hip`) is a
 textbook 16x16 shared-memory tiled multiply, one output element per thread:
@@ -275,38 +287,143 @@ textbook 16x16 shared-memory tiled multiply, one output element per thread:
 for (int q = 0; q < TILE; ++q) acc += As[ty][q] * Bs[q][tx];
 ```
 
-Each FMA consumes two shared-memory reads. Shared memory on both
+Each FMA consumes two shared-memory reads -- confirmed below at the
+instruction level on both ISAs. Shared memory on both
 architectures serves roughly one float per lane per cycle, so this loop can
 issue at best one FMA every two cycles -- a hard ceiling near 25% of the
-single-datapath FP32 rate before accounting for the two `__syncthreads()`
-barriers per k-tile. That ceiling is why both cards sit in the single digits
-as a fraction of peak, and it applies equally to both, which is consistent with
-the flat NVIDIA/AMD ratio.
+single-datapath FP32 rate before accounting for the barriers. That ceiling is
+why both cards sit in the single digits as a fraction of peak, and it applies
+equally to both, which is consistent with the flat NVIDIA/AMD ratio.
 
-Given the kernel is bandwidth-bound rather than FLOP-bound, the most likely
-explanation for the extra gap is **the RX 6650 XT's 128-bit memory bus**. Its
-280 GB/s is normally rescued by 32 MB of Infinity Cache, but at batch 128 the
-working set does not fit: the first hidden activation of `cifar10-full` alone
-is 128 images x 128 channels x 28 x 28 x 4 B = **51 MB**. Past the cache, the
-RX 6650 XT is a narrow-bus card and the RTX 3060 Ti's 256-bit bus pulls ahead
-by more than the headline FP32 ratio suggests. Sustained clocks are a
-secondary candidate: the 2635 MHz figure is boost, and the card has a 180 W
-board power budget against the 3060 Ti's 200 W.
+A second inefficiency affects both cards identically: with `TILE = 16` and a
+32-lane warp/wave, `Bs[q][tx]` spans only 16 consecutive floats, so each access
+touches 16 of the 32 shared-memory banks. Half the bank width goes unused on
+both architectures.
 
-**This attribution is inference from specifications and the kernel source, not
-from a profiler, and should be treated as a hypothesis.** It makes a testable
-prediction: at batch 32 the `cifar10-full` working set drops to ~13 MB and
-fits in Infinity Cache, so the NVIDIA/AMD ratio should *narrow* noticeably. A
-batch-size sweep would settle it in about ten minutes per card, and
-`rocprof`/`ncu` would settle it directly. See
-[Further tests](#further-tests-worth-running).
+### Occupancy is not the answer
 
-One tuning note surfaced while reading the kernel. `BLOCK` is 256 with the
-comment "four wave64s on AMD", but RDNA 2 compute dispatches default to
-**wave32**, so a 256-thread workgroup is eight wave32s on gfx1032, not four
-wave64s. The block size is defensible either way; the reasoning behind it is
-out of date.
+`-Dkernel-stats=true` reports per-kernel resource usage from each vendor
+compiler. The raw output is in `results/rtx3060ti/kernel_info.txt` and
+`results/rx6650xt/kernel_info.txt`; for `gemm_kernel`:
 
+| | RTX 3060 Ti (ptxas, sm_86) | RX 6650 XT (ROCm, gfx1032) |
+|---|---|---|
+| registers | 37 | 23 VGPR + 22 SGPR |
+| spills | 0 stack, 0 store, 0 load | 0 VGPR, 0 SGPR, 0 scratch |
+| shared / LDS per block | 2048 B | 2048 B |
+| barriers | 1 | 1 (`__syncthreads`) |
+| occupancy | not limited: 2 KB of 100 KB per SM, 37 regs of 65536 per SM | **16 waves/SIMD, the gfx10 maximum** |
+
+Both run at full occupancy with no spills and identical shared-memory
+footprints. Across every kernel in the file the picture is the same: no spills
+anywhere, and never more than 40 registers. Neither card is resource-starved,
+so occupancy cannot explain the gap -- and more usefully, this confirms the
+central claim of this report, that the ceiling is **algorithmic** (two operand
+loads per FMA) rather than a tuning problem.
+
+### Cache capacity is not the answer either
+
+The earlier draft of this report hypothesised that the RX 6650 XT's 32 MB
+Infinity Cache was being overrun: at batch 128 a single hidden activation of
+`cifar10-full` is 128 x 128 x 28 x 28 x 4 B = 51 MB, past which the card falls
+back to a narrow 128-bit bus. That predicts the NVIDIA/AMD ratio should
+**narrow at smaller batches**, whose working sets fit.
+
+It does not. Inference throughput on `cifar10-full` across an 8x range of
+batch size:
+
+| batch | working set | RX 6650 XT | RTX 3060 Ti | ratio |
+|---|---|---|---|---|
+| 16 | ~6.4 MB | 257.2 | 586.4 | 2.28x |
+| 32 | ~13 MB | 258.1 | 584.8 | 2.27x |
+| 64 | ~26 MB | 255.6 | 583.0 | 2.28x |
+| 128 | ~51 MB | 254.4 | 578.0 | 2.27x |
+
+The ratio is flat to within 1%. The hypothesis is refuted. (The NVIDIA
+column quotes the second of two passes, which is what `--from-raw`
+regenerates; the first pass differed by at most 0.7%.)
+
+Two further things fall out of the sweep. **Throughput barely responds to batch
+size at all** -- 254 to 258 img/s on AMD, 578 to 586 on NVIDIA, across an 8x
+range. Batch size only changes `N`, the GEMM's column count, which scales the
+number of thread blocks rather than the efficiency of any one of them; the
+per-thread shared-memory traffic that limits this kernel is invariant. And the
+NVIDIA sweep was accidentally run twice, which supplies the repeat measurement
+this report otherwise lacked: **timings reproduced to within 1.1%**, and loss
+and accuracy reproduced *exactly*, so GPU runs are deterministic run-to-run on
+a fixed machine and the 2.27x ratio is far outside measurement noise.
+
+### The instruction streams are equivalent
+
+The last cheap hypothesis was compiler quality: that one toolchain promotes
+more of the tile into registers than the other, changing the real ratio of
+operand loads to FMAs. Disassembling both settles it. Full listings are in
+`results/rx6650xt/amd-gfx1032.s` and `results/rtx3060ti/nvidia-sm86.s`;
+counting one tile iteration of `gemm_kernel`'s loop body:
+
+| per tile iteration | RX 6650 XT (gfx1032) | RTX 3060 Ti (sm_86) |
+|---|---|---|
+| FMAs | 16 `v_fmac_f32` | 16 `FFMA` |
+| shared-memory read instructions | 12 (8x `ds_read2_b32`, 4x `ds_read_b128`) | 20 (16x `LDS`, 4x `LDS.128`) |
+| 32-bit words read from shared | **32** | **32** |
+| **words per FMA** | **2.0** | **2.0** |
+| barriers | 2 `s_barrier` | 2 `BAR.SYNC` |
+| accumulator dependency chain | 16 deep, single register | 16 deep, single register |
+
+**The 2:1 ratio predicted from the source is exactly what both machines
+execute.** That is the single strongest confirmation in this report: the claim
+that the kernel is bound by operand loads per multiply-add is no longer an
+inference from reading C++, it is a count of issued instructions on two
+unrelated ISAs.
+
+It also kills the compiler hypothesis, and in the opposite direction to the one
+suggested by the register counts. AMD's compiler emits **fewer** instructions
+for identical traffic -- 12 shared-memory reads against NVIDIA's 20 -- because
+it used paired and 128-bit forms (`ds_read2_b32`, `ds_read_b128`) where ptxas
+mostly emitted scalar `LDS`. Both schedules are good: loads are hoisted above
+the FMAs that consume them, and AMD's wait counts are pipelined rather than
+serialising (`s_waitcnt lgkmcnt(3)` leaves three loads in flight; only the
+final wait before the barrier is `lgkmcnt(0)`). Neither compiler is leaving
+anything meaningful on the table, and if either is ahead on this kernel it is
+the ROCm one.
+
+One structural detail is worth noting because it applies equally to both and
+is inherent to the source. `acc += As[ty][q] * Bs[q][tx]` accumulates into a
+single variable, so all 16 FMAs form a serial dependency chain -- per-thread
+instruction-level parallelism is exactly 1, and the only thing hiding FMA
+latency is occupancy. Both cards have full occupancy, so this is survivable,
+but a register-blocked rewrite (design item 1) would fix it for free by giving
+each thread several independent accumulators.
+
+### What is actually left
+
+Three explanations have now been proposed and measured away: occupancy, cache
+capacity, and code generation. The instruction streams are equivalent, so
+**the 2.2x gap is not in what the two GPUs are asked to do -- it is in how
+fast they do it.** The specification sheets do not account for that either.
+Peak FP32 favours NVIDIA by 1.50x and memory bandwidth by 1.60x, but the
+quantity this kernel actually depends on, aggregate shared-memory bandwidth,
+favours *AMD* on paper: 32 CUs x 128 B/clk x 2.635 GHz = 10.8 TB/s against
+38 SMs x 128 B/clk x 1.665 GHz = 8.1 TB/s. A kernel issuing two LDS words per
+FMA should run faster on the RX 6650 XT. It runs 2.27x slower.
+
+What remains, none of it measured here:
+
+- **Sustained clocks.** 2635 MHz is a boost figure on a 180 W board against
+  the 3060 Ti's 200 W, and clocks were never sampled during a run. This is now
+  the leading candidate purely by elimination, and it is also the cheapest
+  thing left to check.
+- **Realised versus specified LDS throughput.** Both kernels read 16
+  consecutive words per access, touching 16 of 32 banks; how each
+  architecture services that half-width pattern, and at what latency under
+  eight waves per workgroup, is not something a datasheet answers.
+- **Barrier cost** at two `s_barrier`/`BAR.SYNC` per 16 FMAs.
+
+The honest summary is that this report can say with confidence *what the
+bottleneck is* -- two shared-memory words per multiply-add, on both cards, now
+verified at the instruction level -- and can rule out three explanations for
+why one card handles that bottleneck 2.2x better, without being able to name
+the fourth.
 ## The small-network penalty
 
 Within a single card, achieved throughput varies 6x between the smallest and
@@ -445,7 +562,12 @@ shared-memory reads per FMA on the GPU. Having each thread compute a 4x4
 micro-tile in registers reuses each loaded value four times and lifts
 arithmetic intensity roughly 8x; the equivalent CPU change is a register-blocked
 kernel computing several rows of `C` per pass. It is one change, conceptually,
-and it is the reason all three backends sit at 3-6% of peak. Nothing else on
+and it is the reason all three backends sit at 3-6% of peak. On the GPU side
+the diagnosis is not a reading of the source but a count of issued
+instructions: 16 FMAs against 32 words of shared memory per tile, on both
+architectures. A 4x4 micro-tile would also give each thread four independent
+accumulators instead of the single 16-deep dependency chain both compilers
+are currently forced to emit. Nothing else on
 this list is close in value.
 
 **2. Fuse the elementwise kernels.** Bias, batch-norm scale/shift and
@@ -489,18 +611,25 @@ for hosts whose driver lacks the JIT compiler.
 - **Each GPU has exactly one host CPU**, so "AMD vs NVIDIA end to end" is
   partly "Ryzen vs Xeon". This is why the report leans on the same-host
   speedups and the GFLOP/s normalisation rather than raw cross-machine numbers.
-- **The Infinity Cache explanation is reasoned from specifications**, not
-  measured with a profiler.
+- **The residual 2.2x of the NVIDIA/AMD gap is unexplained.** Occupancy,
+  cache capacity and code generation have each been measured and eliminated;
+  what remains is a list of untested candidates, not a conclusion. Clock
+  behaviour in particular was never sampled.
 - **`infer_load_seconds` is sensitive to filesystem cache state.** The laptop's
   CIFAR-10 decode (8741 img/s) is far below the Ryzen's (97087) by more than
-  hardware explains; that run read cold from disk. The COCO decode figures are
-  consistent between each host's CPU and GPU runs and are trustworthy; the
+  hardware explains; that run read cold from disk. The duplicated NVIDIA sweep
+  makes the same point from the other direction: forward throughput reproduced
+  within 1.1% while end-to-end throughput moved by 16%. The COCO decode figures
+  are consistent between each host's CPU and GPU runs and are trustworthy; the
   MNIST and CIFAR-10 ones should not be used as decoder benchmarks.
-- **Single runs, no repetitions**, so no error bars. The tight agreement of
-  `train_mean_loss` across machines suggests low variance, but that is an
-  argument, not a measurement.
-- **Vendor peak FP32 figures are boost-clock marketing numbers.** The
-  percentages of peak are indicative, not precise.
+- **Only one configuration was measured twice.** The accidental repeat of the
+  NVIDIA sweep put run-to-run variance at 1.1% on forward throughput, with loss
+  and accuracy bit-identical. That is reassuring but it is one data point on
+  one machine; the CPU and AMD figures still have no error bars.
+- **Vendor peak FP32 figures are boost-clock marketing numbers**, and sustained
+  clocks were never sampled. The percentages of peak are indicative, not
+  precise, and clock throttling remains an unexcluded contributor to the AMD
+  gap.
 
 ## Reproducing this
 
@@ -524,7 +653,23 @@ To produce a fresh set on a new machine, after `./bench/get-data.sh`:
     --train-batches 1000 --tag <machine>_computebound
 ./bench/benchmark.sh --platforms cpu --datasets cifar10-full \
     --train-batches 20 --tag <machine>_computebound --append
+
+# the batch-size sweep
+for b in 16 32 64; do
+    ./bench/benchmark.sh --platforms gpu --datasets cifar10-fullb$b \
+        --train-batches 200 --tag <machine>_sweep --append
+done
 ```
+
+Per-kernel register and occupancy data, quoted in
+[Occupancy is not the answer](#occupancy-is-not-the-answer), comes from a
+separate build rather than a benchmark run; `results/*/kernel_info.txt` holds
+the output. The README documents the three ways that build can look broken
+when it is not. The disassembled kernels are committed alongside as
+`results/rx6650xt/amd-gfx1032.s` and `results/rtx3060ti/nvidia-sm86.s`;
+note that `hipcc --genco` writes a compressed offload bundle rather than an
+ELF, so the AMD listing comes from `--offload-device-only -S` rather than
+from `llvm-objdump` on the `.hsaco`.
 
 Provenance (date, host, CPU) is recorded in `<tag>.meta` when the run happens
 and read back by `--from-raw`, so re-rendering someone else's results on your
@@ -532,26 +677,42 @@ machine does not relabel them with your machine.
 
 ## Further tests worth running
 
-In rough order of what they would add to this report:
+Three of the tests originally listed here have been run, and all three came
+back negative: the batch-size sweep refuted the Infinity Cache hypothesis,
+`-Dkernel-stats=true` ruled out occupancy, and the ISA listings showed the two
+instruction streams to be equivalent. Those results are folded into
+[Why NVIDIA is 2.2x AMD](#why-nvidia-is-22x-amd). What is left:
 
-1. **A batch-size sweep on `cifar10-full`** (batch 16/32/64/128) on both GPUs.
-   This directly tests the Infinity Cache hypothesis -- the NVIDIA/AMD ratio
-   should narrow at small batches -- and would turn the weakest attribution in
-   this report into a measured one. About ten minutes per card.
-2. **`nvidia-smi dmon` or `rocm-smi` sampled during a `cifar10-full` run**, to
-   confirm sustained clocks and rule out power throttling as the cause of the
-   AMD gap.
-3. **Kernel resource usage,** now a build flag: `-Dkernel-stats=true`.
-   Registers per thread, spills and shared/LDS per kernel bound occupancy, and
-   would confirm the shared-memory-bound analysis of `gemm_kernel` far more
-   cheaply than disassembly. It needs `-Dcuda-arch=sm_86` on NVIDIA (ptxas
-   never runs in PTX mode) and a touched kernel source on either, since a
-   cached step replays no stderr. See the README for the exact invocations.
-4. **The RTX 3060 Ti in a modern host, or the RX 6650 XT in the Xeon box** --
+1. **Sample clocks during a `cifar10-full` run**, with `bench/monitor.sh`:
+
+   ```sh
+   ./bench/monitor.sh -- ./bench/benchmark.sh --platforms gpu \
+       --datasets cifar10-full --train-batches 1000 --tag <machine>
+   ```
+
+   Sustained-clock throttling is the leading candidate for the unexplained
+   2.2x, purely by elimination, and this is the cheapest remaining test.
+   The RX 6650 XT boosts to 2635 MHz on a 180 W board against the 3060 Ti
+   at 200 W. The number that matters is the median clock as a fraction of
+   each card's own maximum; on NVIDIA the driver also names the throttle
+   reason outright.
+
+2. **Prototype the register-blocked GEMM** -- a 4x4 micro-tile per thread --
+   and re-run `cifar10-full` on both cards. This is design item 1 and would
+   simultaneously test the diagnosis: if the ceiling really is two shared
+   words per FMA, the fix should move both cards several-fold. It may also
+   change the 2.2x ratio, which would itself be informative about the residual.
+3. **A profiler run** (`rocprof`, `ncu`) on `gemm_kernel` alone, reporting
+   achieved LDS bandwidth and issue-slot utilisation. Now that the static
+   analysis is exhausted, only dynamic counters can distinguish "AMD services
+   this access pattern more slowly" from "AMD was running at a lower clock".
+4. **Repeat runs on the CPU and AMD configurations**, which still have no error
+   bars. The accidentally duplicated NVIDIA sweep put variance around 1%.
+5. **The RTX 3060 Ti in a modern host, or the RX 6650 XT in the Xeon box** --
    any swap that breaks the one-GPU-one-CPU confound.
-5. **Repeat runs** for error bars on at least one configuration.
 
-Not needed: disassembly of the CPU path (generated locally, and the scalar-FMA
-finding above came from it) or of the PTX (`zig-out/bin/darknet_kernels.ptx` is
-already readable text). AMD GCN ISA and NVIDIA SASS would only be worth
-producing if item 3 leaves something unexplained.
+Nothing further is needed on the static side. The CPU assembly, the PTX, the
+per-kernel resource statistics and both GPU ISA listings are all in the
+repository, and between them they establish what the bottleneck is; what they
+cannot establish is why two cards with equivalent instruction streams execute
+them 2.2x apart.

@@ -1,0 +1,185 @@
+kernels
+└─ install generated to darknet_kernels.cubin
+   └─ run /nix/store/m9xh59b67yqv83iknk1hncz2gcnibkgb-cuda-toolkit-root/bin/nvcc (darknet_kernels.cubin) w
+ptxas info    : 0 bytes gmem
+ptxas info    : Compiling entry function 'gemm_kernel' for 'sm_86'
+ptxas info    : Function properties for gemm_kernel
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 37 registers, used 1 barriers, 2048 bytes smem, 420 bytes cmem[0]
+ptxas info    : Compile time = 6.749 ms
+ptxas info    : Compiling entry function 'adam_kernel' for 'sm_86'
+ptxas info    : Function properties for adam_kernel
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 21 registers, used 0 barriers, 404 bytes cmem[0]
+ptxas info    : Compile time = 17.735 ms
+ptxas info    : Compiling entry function 'shortcut_kernel' for 'sm_86'
+ptxas info    : Function properties for shortcut_kernel
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 13 registers, used 0 barriers, 432 bytes cmem[0]
+ptxas info    : Compile time = 5.092 ms
+ptxas info    : Compiling entry function 'dropout_kernel' for 'sm_86'
+ptxas info    : Function properties for dropout_kernel
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 10 registers, used 0 barriers, 384 bytes cmem[0]
+ptxas info    : Compile time = 1.276 ms
+ptxas info    : Compiling entry function 'backward_avgpool_kernel' for 'sm_86'
+ptxas info    : Function properties for backward_avgpool_kernel
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 39 registers, used 0 barriers, 384 bytes cmem[0]
+ptxas info    : Compile time = 12.781 ms
+ptxas info    : Compiling entry function 'forward_avgpool_kernel' for 'sm_86'
+ptxas info    : Function properties for forward_avgpool_kernel
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 39 registers, used 0 barriers, 384 bytes cmem[0]
+ptxas info    : Compile time = 13.126 ms
+ptxas info    : Compiling entry function 'backward_maxpool_kernel' for 'sm_86'
+ptxas info    : Function properties for backward_maxpool_kernel
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 34 registers, used 0 barriers, 408 bytes cmem[0]
+ptxas info    : Compile time = 13.225 ms
+ptxas info    : Compiling entry function 'forward_maxpool_kernel' for 'sm_86'
+ptxas info    : Function properties for forward_maxpool_kernel
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 28 registers, used 0 barriers, 408 bytes cmem[0]
+ptxas info    : Compile time = 10.801 ms
+ptxas info    : Compiling entry function 'col2im_kernel' for 'sm_86'
+ptxas info    : Function properties for col2im_kernel
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 40 registers, used 0 barriers, 408 bytes cmem[0], 8 bytes cmem[2]
+ptxas info    : Compile time = 17.419 ms
+ptxas info    : Compiling entry function 'im2col_kernel' for 'sm_86'
+ptxas info    : Function properties for im2col_kernel
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 40 registers, used 0 barriers, 408 bytes cmem[0]
+ptxas info    : Compile time = 10.146 ms
+ptxas info    : Compiling entry function 'smooth_l1_kernel' for 'sm_86'
+ptxas info    : Function properties for smooth_l1_kernel
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 18 registers, used 0 barriers, 392 bytes cmem[0]
+ptxas info    : Compile time = 1.598 ms
+ptxas info    : Compiling entry function 'l1_kernel' for 'sm_86'
+ptxas info    : Function properties for l1_kernel
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 16 registers, used 0 barriers, 392 bytes cmem[0]
+ptxas info    : Compile time = 1.257 ms
+ptxas info    : Compiling entry function 'l2_kernel' for 'sm_86'
+ptxas info    : Function properties for l2_kernel
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 16 registers, used 0 barriers, 392 bytes cmem[0]
+ptxas info    : Compile time = 1.132 ms
+ptxas info    : Compiling entry function 'softmax_x_ent_kernel' for 'sm_86'
+ptxas info    : Function properties for softmax_x_ent_kernel
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 14 registers, used 0 barriers, 392 bytes cmem[0]
+ptxas info    : Compile time = 2.442 ms
+ptxas info    : Compiling entry function 'softmax_kernel' for 'sm_86'
+ptxas info    : Function properties for softmax_kernel
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 38 registers, used 0 barriers, 400 bytes cmem[0]
+ptxas info    : Compile time = 33.217 ms
+ptxas info    : Compiling entry function 'normalize_delta_kernel' for 'sm_86'
+ptxas info    : Function properties for normalize_delta_kernel
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 21 registers, used 0 barriers, 424 bytes cmem[0]
+ptxas info    : Compile time = 12.202 ms
+ptxas info    : Compiling entry function 'fast_variance_delta_kernel' for 'sm_86'
+ptxas info    : Function properties for fast_variance_delta_kernel
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 40 registers, used 1 barriers, 1024 bytes smem, 408 bytes cmem[0]
+ptxas info    : Compile time = 14.783 ms
+ptxas info    : Compiling entry function 'fast_mean_delta_kernel' for 'sm_86'
+ptxas info    : Function properties for fast_mean_delta_kernel
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 39 registers, used 1 barriers, 1024 bytes smem, 392 bytes cmem[0]
+ptxas info    : Compile time = 17.259 ms
+ptxas info    : Compiling entry function 'normalize_kernel' for 'sm_86'
+ptxas info    : Function properties for normalize_kernel
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 16 registers, used 0 barriers, 396 bytes cmem[0]
+ptxas info    : Compile time = 10.395 ms
+ptxas info    : Compiling entry function 'fast_variance_kernel' for 'sm_86'
+ptxas info    : Function properties for fast_variance_kernel
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 40 registers, used 1 barriers, 1024 bytes smem, 392 bytes cmem[0]
+ptxas info    : Compile time = 16.536 ms
+ptxas info    : Compiling entry function 'fast_mean_kernel' for 'sm_86'
+ptxas info    : Function properties for fast_mean_kernel
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 39 registers, used 1 barriers, 1024 bytes smem, 384 bytes cmem[0]
+ptxas info    : Compile time = 15.695 ms
+ptxas info    : Compiling entry function 'backward_scale_kernel' for 'sm_86'
+ptxas info    : Function properties for backward_scale_kernel
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 40 registers, used 1 barriers, 1024 bytes smem, 392 bytes cmem[0]
+ptxas info    : Compile time = 10.854 ms
+ptxas info    : Compiling entry function 'backward_bias_conn_kernel' for 'sm_86'
+ptxas info    : Function properties for backward_bias_conn_kernel
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 40 registers, used 0 barriers, 376 bytes cmem[0]
+ptxas info    : Compile time = 5.907 ms
+ptxas info    : Compiling entry function 'backward_bias_kernel' for 'sm_86'
+ptxas info    : Function properties for backward_bias_kernel
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 39 registers, used 1 barriers, 1024 bytes smem, 380 bytes cmem[0]
+ptxas info    : Compile time = 8.556 ms
+ptxas info    : Compiling entry function 'scale_bias_kernel' for 'sm_86'
+ptxas info    : Function properties for scale_bias_kernel
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 12 registers, used 0 barriers, 380 bytes cmem[0]
+ptxas info    : Compile time = 3.057 ms
+ptxas info    : Compiling entry function 'add_bias_kernel' for 'sm_86'
+ptxas info    : Function properties for add_bias_kernel
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 12 registers, used 0 barriers, 380 bytes cmem[0]
+ptxas info    : Compile time = 3.059 ms
+ptxas info    : Compiling entry function 'rand_uniform_kernel' for 'sm_86'
+ptxas info    : Function properties for rand_uniform_kernel
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 8 registers, used 0 barriers, 372 bytes cmem[0]
+ptxas info    : Compile time = 1.252 ms
+ptxas info    : Compiling entry function 'constrain_kernel' for 'sm_86'
+ptxas info    : Function properties for constrain_kernel
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 8 registers, used 0 barriers, 368 bytes cmem[0]
+ptxas info    : Compile time = 0.959 ms
+ptxas info    : Compiling entry function 'add_scalar_kernel' for 'sm_86'
+ptxas info    : Function properties for add_scalar_kernel
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 8 registers, used 0 barriers, 368 bytes cmem[0]
+ptxas info    : Compile time = 0.920 ms
+ptxas info    : Compiling entry function 'mul_kernel' for 'sm_86'
+ptxas info    : Function properties for mul_kernel
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 10 registers, used 0 barriers, 376 bytes cmem[0]
+ptxas info    : Compile time = 0.859 ms
+ptxas info    : Compiling entry function 'scal_kernel' for 'sm_86'
+ptxas info    : Function properties for scal_kernel
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 8 registers, used 0 barriers, 368 bytes cmem[0]
+ptxas info    : Compile time = 0.799 ms
+ptxas info    : Compiling entry function 'axpy_kernel' for 'sm_86'
+ptxas info    : Function properties for axpy_kernel
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 10 registers, used 0 barriers, 376 bytes cmem[0]
+ptxas info    : Compile time = 0.866 ms
+ptxas info    : Compiling entry function 'copy_kernel' for 'sm_86'
+ptxas info    : Function properties for copy_kernel
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 8 registers, used 0 barriers, 376 bytes cmem[0]
+ptxas info    : Compile time = 0.811 ms
+ptxas info    : Compiling entry function 'fill_kernel' for 'sm_86'
+ptxas info    : Function properties for fill_kernel
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 8 registers, used 0 barriers, 368 bytes cmem[0]
+ptxas info    : Compile time = 0.736 ms
+ptxas info    : Compiling entry function 'gradient_array_kernel' for 'sm_86'
+ptxas info    : Function properties for gradient_array_kernel
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 11 registers, used 0 barriers, 376 bytes cmem[0], 68 bytes cmem[2]
+ptxas info    : Compile time = 3.353 ms
+ptxas info    : Compiling entry function 'activate_array_kernel' for 'sm_86'
+ptxas info    : Function properties for activate_array_kernel
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 16 registers, used 0 barriers, 368 bytes cmem[0], 56 bytes cmem[2]
+ptxas info    : Compile time = 13.980 ms
+failed command: /nix/store/m9xh59b67yqv83iknk1hncz2gcnibkgb-cuda-toolkit-root/bin/nvcc -Xptxas -v -cubin -x cu -O3 -arch=sm_86 -Wno-deprecated-gpu-targets -I/nix/store/m9xh59b67yqv83iknk1hncz2gcnibkgb-cuda-toolkit-root/include -o /root/workspace/darknet_zig/.zig-cache/o/7b9a265ce9e16eca6343fe396a24d778/darknet_kernels.cubin /root/workspace/darknet_zig/src/kernels/darknet_kernels.hip

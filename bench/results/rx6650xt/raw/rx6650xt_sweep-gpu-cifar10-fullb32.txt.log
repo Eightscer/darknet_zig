@@ -1,4 +1,4 @@
-CUDA device 0: NVIDIA GeForce RTX 3060 Ti (7700 MiB free / 7841 MiB total)
+HIP device 0: AMD Radeon RX 6650 XT (7998 MiB free / 8176 MiB total)
 layer     filters    size              input                output
     0 conv    128  3 x 3 / 1    28 x  28 x   3   ->    28 x  28 x 128  0.005 BFLOPs
     1 conv    128  3 x 3 / 1    28 x  28 x 128   ->    28 x  28 x 128  0.231 BFLOPs
@@ -17,7 +17,7 @@ layer     filters    size              input                output
    14 conv     10  1 x 1 / 1     7 x   7 x 512   ->     7 x   7 x  10  0.001 BFLOPs
    15 avg                        7 x   7 x  10   ->    10
    16 softmax                                          10
-Saving weights to /root/workspace/darknet_zig/bench/data/cifar10/backup/cifar10-full-gpu.weights
+Saving weights to /home/milo/Documents/zig/darknet_zig/bench/data/cifar10/backup/cifar10-fullb32-gpu.weights
 layer     filters    size              input                output
     0 conv    128  3 x 3 / 1    28 x  28 x   3   ->    28 x  28 x 128  0.005 BFLOPs
     1 conv    128  3 x 3 / 1    28 x  28 x 128   ->    28 x  28 x 128  0.231 BFLOPs
@@ -36,4 +36,4 @@ layer     filters    size              input                output
    14 conv     10  1 x 1 / 1     7 x   7 x 512   ->     7 x   7 x  10  0.001 BFLOPs
    15 avg                        7 x   7 x  10   ->    10
    16 softmax                                          10
-Loading weights from /root/workspace/darknet_zig/bench/data/cifar10/backup/cifar10-full-gpu.weights...Done!
+Loading weights from /home/milo/Documents/zig/darknet_zig/bench/data/cifar10/backup/cifar10-fullb32-gpu.weights...Done!

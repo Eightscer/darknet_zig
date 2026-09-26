@@ -346,6 +346,7 @@ examples/
 bench/
   see bench/README.md   -- benchmark suite over MNIST, CIFAR-10 and COCO
   see bench/REPORT.md   -- CPU vs HIP vs CUDA results and analysis
+  monitor.sh            -- samples GPU clocks/power while a command runs
 ```
 
 ## Notes on the port

@@ -216,6 +216,11 @@ measured so far:
 | `results/rx6650xt/` | Ryzen 7 5700G | Radeon RX 6650 XT (gfx1032) | HIP |
 | `results/rtx3060ti/` | Xeon E5-1680 v3 | GeForce RTX 3060 Ti | CUDA |
 
+Each GPU directory also holds `info.txt` (host `nproc` and the vendor SMI
+dump), `kernel_info.txt` (per-kernel register, spill and occupancy data
+from `-Dkernel-stats=true`) and the disassembled device code (`*.s`), plus a
+`_sweep` table from the batch-size sweep.
+
 **[`REPORT.md`](REPORT.md) is the full CPU vs HIP vs CUDA analysis** of
 those runs -- where each backend spends its time, why NVIDIA leads AMD by
 a constant 2.2x, and why the faster GPU lost the COCO end-to-end number.
@@ -237,6 +242,43 @@ that 80-way classification of small occluded crops needs either a bigger net
 or far more than four epochs. COCO earns its place in the suite by being the
 only dataset here with real JPEG decode cost and an 80-wide output, both of
 which are what the throughput columns are measuring.
+
+## Watching the clocks
+
+`monitor.sh` samples GPU clock, power, temperature and utilisation while
+something runs, and reports what the card actually sustained:
+
+```sh
+./bench/monitor.sh -- ./bench/benchmark.sh --platforms gpu \
+    --datasets cifar10-full --train-batches 1000 --tag <machine>
+```
+
+It wraps the command rather than running alongside it, so sampling starts and
+stops with the work and the exit status is passed through. Samples land in
+`results/monitor-<timestamp>.csv`; the summary only counts samples taken while
+the GPU was at least 90% busy (`--busy`), so idle startup and the weight-saving
+tail do not drag the averages down.
+
+What it prints is the median clock **as a fraction of that card's own
+maximum**, which is the only form that compares across vendors -- 2310 MHz
+means nothing next to 1800 MHz until you know both cards' ceilings. A median
+well below 100%, or a 10th percentile far below the median, is sustained
+throttling; a steady clock at the cap is not. On NVIDIA it also reports the
+driver's own throttle reasons (`SwPowerCap`, `HwSlowdown`, `SwThermalSlowdown`
+and so on), which name the cause directly.
+
+NVIDIA goes through `nvidia-smi`. **AMD reads sysfs rather than `rocm-smi`**,
+for three reasons: it needs no ROCm libraries, which matters because `rocm-smi`
+on our test machine cannot load `libdrm_amdgpu` and fails `get_name`; sysfs
+reports the real shader clock from `freq1_input`, whereas `rocm-smi`'s DPM
+state is three coarse values on RDNA 2 and would hide exactly the throttling
+being looked for; and it sidesteps card numbering. That last point matters on
+any desktop with an AMD APU, where the iGPU is a second `amdgpu` device --
+the script defaults to the card with the most VRAM and prints which it chose,
+and `--card N` overrides it.
+
+If you want `rocm-smi` anyway as a cross-check, `rocm-smi --showgpuclocks
+--showpower` works even when `get_name` does not.
 
 ## Notes
 

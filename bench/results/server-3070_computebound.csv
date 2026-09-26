@@ -1,3 +1,0 @@
-platform,dataset,device,classes,train_img_per_s,train_final_loss,infer_img_per_s,infer_e2e_img_per_s,top1,top5,majority_baseline
-gpu,cifar10-full,NVIDIA GeForce RTX 3060 Ti,10,205.9,0.9671,578.0,562.9,0.5242,0.9482,0.1000
-cpu,cifar10-full,CPU,10,2.6,2.1326,8.9,8.9,0.1750,0.5437,0.1000
