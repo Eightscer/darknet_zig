@@ -54,11 +54,28 @@ if [ "$mode" = report ] || [ "$mode" = apply ]; then
     echo "== card$card ($bdf, $(( $(cat "$dev/mem_info_vram_total") / 1048576 )) MiB) =="
     echo
     echo "-- clock governance (the 1200 MHz question) --"
+
+    # The VBIOS identity, and where the driver got it. A dual-BIOS switch
+    # changes the first; whether amdgpu read the board ROM at all changes
+    # the second, and the two questions are easy to confuse.
+    vb=$(dmesg 2>/dev/null | grep -m1 'ATOM BIOS:' | sed 's/.*ATOM BIOS: //') || true
+    vs=$(dmesg 2>/dev/null | grep -m1 'Fetched VBIOS from' | sed 's/.*Fetched VBIOS from //') || true
+    printf '  vbios               %s\n' "${vb:-unreadable (try as root)}"
+    printf '  vbios source        %s\n' "${vs:-unreadable (try as root)}"
     printf '  performance level   %s\n' "$(rd "$dev/power_dpm_force_performance_level")"
     printf '  sclk DPM levels     %s\n' "$(tr '\n' ' ' < "$dev/pp_dpm_sclk" 2>/dev/null || echo unavailable)"
     printf '  mclk DPM levels     %s\n' "$(tr '\n' ' ' < "$dev/pp_dpm_mclk" 2>/dev/null || echo unavailable)"
     printf '  power profile       %s\n' "$(grep '\*' "$dev/pp_power_profile_mode" 2>/dev/null | sed 's/^ *//;s/  */ /g' || echo unavailable)"
     printf '  runtime PM          %s\n' "$(rd "$dev/power/control")"
+    # The DPM table is a summary; pp_od_clk_voltage reports the range the
+    # card will actually accept, which is the way to tell a genuinely
+    # capped ceiling from a misread of the three-entry pp_dpm_sclk format.
+    if [ -r "$dev/pp_od_clk_voltage" ]; then
+        echo '  od clk ranges'
+        sed 's/^/    /' "$dev/pp_od_clk_voltage"
+    else
+        echo '  od clk ranges       unavailable'
+    fi
     printf '  power cap / ceiling %s / %s W\n' \
         "$(awk '{printf "%.0f", $1/1000000}' "$hwmon/power1_cap" 2>/dev/null || echo ?)" \
         "$(awk '{printf "%.0f", $1/1000000}' "$hwmon/power1_cap_max" 2>/dev/null || echo ?)"
@@ -69,11 +86,14 @@ if [ "$mode" = report ] || [ "$mode" = apply ]; then
         [ "$(cat "$s")" = connected ] && { disp=yes; echo "  display connected:  $(basename "$(dirname "$s")")"; }
     done
     [ "$disp" = no ] && echo "  display connected:  none (good -- nothing is driving a screen off this card)"
+    [ "$disp" = yes ] && echo "  WARNING: this card drives a display; a compositor competes for it and"
+    [ "$disp" = yes ] && echo "           holds it in display-oriented power states"
     users=$(for f in /proc/[0-9]*/fd/*; do
                 l=$(readlink "$f" 2>/dev/null) || continue
                 case "$l" in /dev/dri/*) echo "$(echo "$f" | cut -d/ -f3)";; esac
             done 2>/dev/null | sort -u)
     if [ -n "$users" ]; then
+        echo "  WARNING: other clients hold /dev/dri; quiesce these before measuring"
         echo "  processes on /dev/dri:"
         for p in $users; do printf '    pid %-7s %s\n' "$p" "$(tr '\0' ' ' < /proc/$p/cmdline 2>/dev/null | cut -c1-70)"; done
     else

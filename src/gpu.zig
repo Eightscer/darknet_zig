@@ -59,6 +59,17 @@ pub const block_size: u32 = 256;
 /// Tile edge for the GEMM kernel. Must match TILE in the .hip file.
 pub const gemm_tile: u32 = 16;
 
+/// Edge of the C tile the register-blocked GEMM kernel covers per block. It
+/// uses the same `gemm_tile` x `gemm_tile` thread block, with each thread
+/// owning a 4x4 square of the output, so this is four times the thread tile.
+pub const gemm_block_tile: u32 = gemm_tile * 4;
+
+/// Below this the register-blocked kernel is not worth dispatching: its
+/// 64-wide tile would be mostly out-of-bounds padding, and the wasted
+/// multiply-adds cancel the arithmetic-intensity win. darknet's first
+/// convolution in a small network has m = 16 filters, which lands here.
+const gemm_block_min: usize = 64;
+
 /// A device-side float array. A null pointer means "this layer doesn't use
 /// this buffer", the same convention the host-side empty slices follow.
 pub const Buf = struct {
@@ -176,6 +187,7 @@ const Kernels = struct {
     shortcut_kernel: Kernel = .{},
     adam_kernel: Kernel = .{},
     gemm_kernel: Kernel = .{},
+    gemm_block_kernel: Kernel = .{},
 };
 
 /// Locate the compiled device code -- `darknet_kernels.hsaco` on AMD,
@@ -625,6 +637,23 @@ pub fn gemm(
     ldc: usize,
 ) void {
     if (m == 0 or n == 0) return;
+    // The register-blocked kernel issues 0.5 shared-memory words per
+    // multiply-add against the simple kernel's 2.0, but only pays off when
+    // both dimensions can fill its wider tile.
+    if (m >= gemm_block_min and n >= gemm_block_min) {
+        const bx: u32 = @intCast((n + gemm_block_tile - 1) / gemm_block_tile);
+        const by: u32 = @intCast((m + gemm_block_tile - 1) / gemm_block_tile);
+        launchDims(kernels.gemm_block_kernel, bx, by, gemm_tile, gemm_tile, .{
+            @as(c_int, if (ta) 1 else 0), @as(c_int, if (tb) 1 else 0),
+            ci(m),                        ci(n),
+            ci(k),                        alpha,
+            a.ptr,                        ci(lda),
+            b.ptr,                        ci(ldb),
+            beta,                         c.ptr,
+            ci(ldc),
+        });
+        return;
+    }
     const gx: u32 = @intCast((n + gemm_tile - 1) / gemm_tile);
     const gy: u32 = @intCast((m + gemm_tile - 1) / gemm_tile);
     launchDims(kernels.gemm_kernel, gx, gy, gemm_tile, gemm_tile, .{

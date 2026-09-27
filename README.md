@@ -337,6 +337,7 @@ src/
   hip/hip.zig         AMD backend: HIP runtime bindings
   cuda/cuda.zig       NVIDIA backend: CUDA driver API bindings
   kernels/*.hip       device kernels -- the only C++ in the project
+  kernels/verify.sh   checks those kernels on the host, no GPU needed
   c/                  stb_image, the only host C
   smoke_test.zig      end-to-end tests
   benchmark.zig       the `benchmark` subcommand: timed training + inference
@@ -360,12 +361,32 @@ pixels match darknet's bit for bit. The HIP *runtime* API is called directly
 from Zig through hand-written `extern fn` declarations; there is no `@cImport`
 anywhere.
 
-**No cuBLAS equivalent.** darknet delegated GEMM to cuBLAS. The HIP counterpart
-is rocBLAS, a second and much larger ROCm dependency. `gemm_kernel` in the
-`.hip` file is a hand-written shared-memory tiled kernel instead: slower than
-rocBLAS on large matrices, still far faster than the CPU, and it keeps
-`libamdhip64` as the only thing this links. If throughput matters more than the
-dependency count, that one function is the thing to replace.
+**No cuBLAS equivalent.** darknet delegated GEMM to cuBLAS. The HIP
+counterpart is rocBLAS, a second and much larger ROCm dependency. The `.hip`
+file carries two hand-written kernels instead, and keeps `libamdhip64` as the
+only thing this links.
+
+`gemm_kernel` is a straightforward 16x16 shared-memory tile with one output
+element per thread. That costs two shared-memory reads per multiply-add --
+confirmed by counting instructions in both the gfx1032 and sm_86 listings,
+which issue exactly 32 words of shared memory against 16 FMAs per tile step --
+and it is why both GPUs sat at single-digit percentages of peak FP32.
+
+`gemm_block_kernel` gives each thread a 4x4 square of the output held in
+registers, so one row of `a` and one column of `b` feed sixteen multiply-adds
+instead of one: 0.5 words per FMA, a 4x improvement in arithmetic intensity,
+verified in the compiled ISA. It costs 58 VGPRs against 23, with no spills and
+still 16 waves/SIMD on gfx1032, so the intensity is bought without giving up
+occupancy. `gpu.gemm` dispatches to it when both `m` and `n` are at least 64;
+below that its wider tile would be mostly out-of-bounds padding and the wasted
+multiply-adds would cancel the win, which is the case for the first
+convolution of a small network.
+
+`src/kernels/verify.sh` checks both kernels without a GPU, by running a thread
+block's 256 threads as real threads against a `std::barrier` so `__shared__`
+and `__syncthreads()` behave as they do on a device. It asserts the blocked
+kernel is bit-identical to the simple one across ragged shapes, all four
+transpose combinations, `K` smaller than a tile, and non-unit alpha/beta.
 
 **No curand either.** Dropout masks come from a counter-based hash of the
 element index and a host-supplied seed, which needs no device-side generator
@@ -420,8 +441,8 @@ Zig's allocator interface, `classifier valid` and `classifier predict` now pass
 training size. 78 MB resident, 0.15 s wall, and the prediction is unchanged.
 Training is untouched -- there every buffer really is used every step.
 
-**The GEMM is threaded, and needs to be.** darknet ships with `OPENMP=0`, so its
-`gemm_nn` is single-threaded. Predicting `tiny.cfg` on `dog.jpg`:
+**The GEMM is threaded and register-blocked.** darknet ships with `OPENMP=0`,
+so its `gemm_nn` is single-threaded. Predicting `tiny.cfg` on `dog.jpg`:
 
 | | |
 |---|---|
@@ -429,17 +450,28 @@ Training is untouched -- there every buffer really is used every step.
 | darknet-zig, GEMM threading off | ~0.228 s |
 | darknet-zig, threading on | ~0.087 s |
 
-So the 17% win is entirely threading, and it is covering for a scalar GEMM that
-is **2.2x slower than the C**. Benchmarked on tiny.cfg's actual shapes, gcc's
-`gemm_nn` sustains 17-25 GFLOP/s while this one manages 4-5. The assembly says
-why: gcc emits packed SSE, LLVM emits `vfmadd213ss` -- scalar FMA. It unrolls
-the inner loop but will not vectorize it, because it cannot prove the output
-row and the input row do not overlap and will not hoist a runtime alias check
-out of the enclosing `k` loop. Marking the innermost pointers `noalias` does
-make LLVM emit packed FMAs, but measured no faster, so vectorization alone is
-not the whole story and the honest fix is a blocked GEMM that reuses each `B`
-row across several `C` rows. Not attempted; the GPU backend is the answer to
-throughput here, and on the CPU the thread pool hides most of it.
+Threading alone was covering for a scalar inner loop. The original shape,
+`C[j] += scale * B[j]`, is what an autovectoriser should turn into packed
+FMAs, and LLVM would not: disassembling the release binary found 41
+`vfmadd*ss` and not one packed instruction, because it could not prove the
+output row and the input row do not overlap and would not hoist the runtime
+alias check out of the enclosing `k` loop. Marking the pointers `noalias` did
+produce packed FMAs and measured no faster, which was the clue that
+vectorisation was never the real problem: that statement moves 12 bytes per 2
+flops -- an arithmetic intensity of 0.17 flops/byte -- so it stays pinned
+against L1 bandwidth however wide the instructions are.
+
+`gemmPanel` fixes the intensity instead. It accumulates `mr` rows of `C` at
+once in explicit `@Vector` registers across the whole of `k`, so each loaded
+element of `B` feeds four multiply-adds and each element of `C` is read and
+written once per panel rather than once per step of `k`. Writing the vectors
+out by hand rather than hoping for autovectorisation also sidesteps the alias
+problem entirely. On MNIST at 1000 batches this took training from 465 to 612
+images/second and inference from 1275 to 2522, with `train_mean_loss`
+unchanged at 0.1742.
+
+The transposed-B variants (`gemmNT`, `gemmTT`) still use the original
+dot-product shape; they are the backward-weights path and were left alone.
 
 ## Why NVIDIA goes through the CUDA driver API, not HIP
 

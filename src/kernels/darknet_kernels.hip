@@ -650,3 +650,85 @@ extern "C" __global__ void gemm_kernel(int TA, int TB, int M, int N, int K, floa
         C[idx] = (BETA == 0.f) ? ALPHA * acc : ALPHA * acc + BETA * C[idx];
     }
 }
+
+// Register-blocked variant of the same multiply, for the shapes big enough to
+// benefit. `gemm_kernel` above gives every thread one output element, so each
+// multiply-add needs two shared-memory reads of its own -- measured at exactly
+// 2.0 words per FMA in the compiled ISA on both architectures, and the reason
+// both GPUs sit in the single digits as a fraction of peak.
+//
+// Here each thread owns a BMICRO x BMICRO square of C held in registers, so one
+// row of `a` and one column of `b` feed BMICRO*BMICRO multiply-adds instead of
+// one. That is 2*BMICRO shared reads per BMICRO^2 FMAs: 0.5 words per FMA at
+// BMICRO = 4, a 4x improvement in arithmetic intensity. The float4 loads keep
+// it to two shared instructions per thread per step and sidestep the bank
+// conflicts a strided scalar read of the same data would hit.
+//
+// The block covers BTILE x BTILE of C with TILE x TILE threads, so BTILE must
+// equal TILE * BMICRO. Shared memory is 2 * TILE * BTILE floats = 8 KB, well
+// inside both architectures' budgets at this occupancy.
+#define BMICRO 4
+#define BTILE (TILE * BMICRO)
+
+extern "C" __global__ void gemm_block_kernel(int TA, int TB, int M, int N, int K, float ALPHA,
+                                             const float *A, int lda, const float *B, int ldb,
+                                             float BETA, float *C, int ldc) {
+    __shared__ float As[TILE][BTILE];
+    __shared__ float Bs[TILE][BTILE];
+
+    const int tx = threadIdx.x;
+    const int ty = threadIdx.y;
+    const int tid = ty * TILE + tx;
+    const int row0 = blockIdx.y * BTILE;
+    const int col0 = blockIdx.x * BTILE;
+
+    float acc[BMICRO][BMICRO];
+    #pragma unroll
+    for (int x = 0; x < BMICRO; ++x)
+        #pragma unroll
+        for (int y = 0; y < BMICRO; ++y) acc[x][y] = 0.f;
+
+    for (int t = 0; t < K; t += TILE) {
+        // TILE*BTILE elements per tile, TILE*TILE threads: BMICRO loads each.
+        // Indexing so consecutive threads fill consecutive columns keeps both
+        // the global reads and the shared writes coalesced.
+        #pragma unroll
+        for (int l = 0; l < BMICRO; ++l) {
+            const int idx = tid + l * (TILE * TILE);
+            const int kk = idx / BTILE;
+            const int ii = idx % BTILE;
+            const int ak = t + kk;
+            const int ar = row0 + ii;
+            const int bc = col0 + ii;
+            As[kk][ii] = (ar < M && ak < K) ? a_at(A, TA, lda, ar, ak) : 0.f;
+            Bs[kk][ii] = (bc < N && ak < K) ? b_at(B, TB, ldb, ak, bc) : 0.f;
+        }
+        __syncthreads();
+
+        #pragma unroll
+        for (int kk = 0; kk < TILE; ++kk) {
+            const float4 a4 = *reinterpret_cast<const float4 *>(&As[kk][ty * BMICRO]);
+            const float4 b4 = *reinterpret_cast<const float4 *>(&Bs[kk][tx * BMICRO]);
+            const float a[BMICRO] = { a4.x, a4.y, a4.z, a4.w };
+            const float b[BMICRO] = { b4.x, b4.y, b4.z, b4.w };
+            #pragma unroll
+            for (int x = 0; x < BMICRO; ++x)
+                #pragma unroll
+                for (int y = 0; y < BMICRO; ++y) acc[x][y] += a[x] * b[y];
+        }
+        __syncthreads();
+    }
+
+    #pragma unroll
+    for (int x = 0; x < BMICRO; ++x) {
+        const int r = row0 + ty * BMICRO + x;
+        if (r >= M) continue;
+        #pragma unroll
+        for (int y = 0; y < BMICRO; ++y) {
+            const int c = col0 + tx * BMICRO + y;
+            if (c >= N) continue;
+            const int idx = r * ldc + c;
+            C[idx] = (BETA == 0.f) ? ALPHA * acc[x][y] : ALPHA * acc[x][y] + BETA * C[idx];
+        }
+    }
+}

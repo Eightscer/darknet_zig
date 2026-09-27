@@ -222,8 +222,10 @@ from `-Dkernel-stats=true`) and the disassembled device code (`*.s`), plus a
 `_sweep` table from the batch-size sweep.
 
 **[`REPORT.md`](REPORT.md) is the full CPU vs HIP vs CUDA analysis** of
-those runs -- where each backend spends its time, why NVIDIA leads AMD by
-a constant 2.2x, and why the faster GPU lost the COCO end-to-end number.
+those runs -- where each backend spends its time, why both GPUs sit at
+single-digit percentages of peak, why the faster GPU lost the COCO
+end-to-end number, and how most of the AMD figures turned out to have been
+taken on a card whose dual-BIOS switch was set to a mining profile.
 
 `results/laptop-cpu.md` is the CPU run described above. Two things in it
 are worth reading carefully rather than at a glance:
