@@ -1,0 +1,23 @@
+Running on the CPU; pass -gpu <index> to use the CUDA backend.
+layer     filters    size              input                output
+    0 conv     16  3 x 3 / 1    28 x  28 x   3   ->    28 x  28 x  16  0.001 BFLOPs
+    1 max          2 x 2 / 2    28 x  28 x  16   ->    14 x  14 x  16
+    2 conv     32  3 x 3 / 1    14 x  14 x  16   ->    14 x  14 x  32  0.002 BFLOPs
+    3 max          2 x 2 / 2    14 x  14 x  32   ->     7 x   7 x  32
+    4 conv     64  3 x 3 / 1     7 x   7 x  32   ->     7 x   7 x  64  0.002 BFLOPs
+    5 connected                            3136  ->   128
+    6 dropout       p = 0.50                128  ->   128
+    7 connected                             128  ->    10
+    8 softmax                                          10
+Saving weights to /root/workspace/darknet_zig/bench/data/mnist/backup/mnist-cpu.weights
+layer     filters    size              input                output
+    0 conv     16  3 x 3 / 1    28 x  28 x   3   ->    28 x  28 x  16  0.001 BFLOPs
+    1 max          2 x 2 / 2    28 x  28 x  16   ->    14 x  14 x  16
+    2 conv     32  3 x 3 / 1    14 x  14 x  16   ->    14 x  14 x  32  0.002 BFLOPs
+    3 max          2 x 2 / 2    14 x  14 x  32   ->     7 x   7 x  32
+    4 conv     64  3 x 3 / 1     7 x   7 x  32   ->     7 x   7 x  64  0.002 BFLOPs
+    5 connected                            3136  ->   128
+    6 dropout       p = 0.50                128  ->   128
+    7 connected                             128  ->    10
+    8 softmax                                          10
+Loading weights from /root/workspace/darknet_zig/bench/data/mnist/backup/mnist-cpu.weights...Done!
