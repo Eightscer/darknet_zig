@@ -78,6 +78,15 @@ const gemm_block_min: usize = 64;
 /// shapes it was supposed to help.
 var gemm_simple_only: bool = false;
 
+/// Which GEMM kernel a GPU run will use, for the benchmark to record. A run
+/// that does not report this at all was produced by a binary predating the
+/// register-blocked kernel, which is worth being able to tell apart from a
+/// run that chose the simple one.
+pub fn gemmPolicy() []const u8 {
+    if (!active()) return "cpu";
+    return if (gemm_simple_only) "simple" else "blocked";
+}
+
 /// A device-side float array. A null pointer means "this layer doesn't use
 /// this buffer", the same convention the host-side empty slices follow.
 pub const Buf = struct {

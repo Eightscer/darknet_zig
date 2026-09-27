@@ -1,0 +1,74 @@
+
+== card1 (0000:03:00.0, 8176 MiB) ==
+
+-- clock governance (the 1200 MHz question) --
+  performance level   auto
+  sclk DPM levels     0: 0Mhz * 1: 0Mhz * 
+  mclk DPM levels     0: 96Mhz * 1: 541Mhz  2: 675Mhz  3: 1094Mhz  
+  power profile       0 BOOTUP_DEFAULT*:
+  runtime PM          auto
+  power cap / ceiling 143 / 143 W
+-- is anything else using it --
+  display connected:  card1-HDMI-A-1
+  processes on /dev/dri: none
+
+-- host --
+  cpu governor        powersave
+  gpu busy now        0%
+
+== applying compute state (previous values -> /tmp/darknet-gpu-prep.state) ==
+  control: auto -> on
+  pp_power_profile_mode: 0 -> 5
+  power_dpm_force_performance_level: auto -> high
+
+now:
+  performance level   high
+  sclk DPM levels     0: 0Mhz * 1: 0Mhz * 
+
+run the benchmark, then: sudo ./bench/gpu-prep.sh --restore
+monitoring amdgpu card1 (8176 MiB VRAM) via sysfs
+  sclk from    /sys/class/drm/card1/device/hwmon/hwmon3/freq1_input (label: sclk)
+  dpm levels   0: 0Mhz * 1: 0Mhz * 
+  perf level   high
+  power cap    143 W (ceiling 143 W)
+sampling every 0.5s into /home/milo/Documents/zig/darknet_zig/bench/results/monitor-20260927T160600Z.csv
+== running: ./bench/benchmark.sh --platforms gpu --datasets cifar10-full --train-batches 100 --tag rx6650xt_clean ==
+== gpu / cifar10-full ==
+  backend=HIP
+  device=AMD Radeon RX 6650 XT
+  device_memory_mib=8176
+  net=cifar10-full
+  classes=10
+  train_batch=128
+  train_pool_images=50000
+  train_batches=100
+  train_images=12800
+  train_seconds=71.026
+  train_images_per_sec=180.2
+  train_mean_loss=1.8981
+  train_final_loss=1.6098
+  infer_batch=128
+  infer_images=10000
+  infer_forward_seconds=18.952
+  infer_forward_images_per_sec=527.7
+  infer_load_seconds=0.486
+  infer_end_to_end_images_per_sec=514.5
+  top1=0.1976
+  top5=0.6243
+
+wrote /home/milo/Documents/zig/darknet_zig/bench/results/rx6650xt_clean.csv
+wrote /home/milo/Documents/zig/darknet_zig/bench/results/rx6650xt_clean.md
+
+== sustained behaviour while busy >= 90% ==
+  samples          178 of 183
+  clock median     2608 MHz
+  clock p10 / min  2564 / 2535 MHz
+  clock max        2733 MHz
+  power mean/max   142 / 143 W  (cap 143 W)
+  temp max         70 C
+  throttle reasons: none reported
+
+  A median well under 100% of maximum, or a p10 far below the median,
+  is sustained throttling. A steady clock at the cap is not.
+
+wrote /home/milo/Documents/zig/darknet_zig/bench/results/monitor-20260927T160600Z.csv

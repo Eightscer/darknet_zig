@@ -5,3 +5,9 @@ backup/
 *.backup
 *.hsaco
 .cuda-toolkit/
+
+# Upstream darknet, cloned alongside for the parity comparison in the README.
+# It carries its own .git, so it could only ever be a submodule here, and
+# pinning a reference implementation that way buys nothing: the comparison is
+# run by hand, occasionally, against whatever upstream currently is.
+darknet/

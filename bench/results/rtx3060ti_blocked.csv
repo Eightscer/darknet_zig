@@ -1,7 +1,0 @@
-platform,dataset,device,classes,batches,train_img_per_s,train_final_loss,infer_img_per_s,infer_e2e_img_per_s,top1,top5,majority_baseline
-cpu,mnist,CPU,10,1000,482.2,0.0649,1787.7,1732.1,0.9758,0.9996,0.1135
-cpu,cifar10,CPU,10,1000,132.2,1.1732,624.4,592.5,0.5871,0.9523,0.1000
-cpu,coco,CPU,80,1000,32.3,2.9329,99.6,91.9,0.3445,0.5537,0.3110
-gpu,mnist,NVIDIA GeForce RTX 3060 Ti,10,1000,8476.9,0.1427,29938.1,24482.8,0.9768,0.9996,0.1135
-gpu,cifar10,NVIDIA GeForce RTX 3060 Ti,10,1000,3448.5,1.4526,7256.0,6149.1,0.5808,0.9551,0.1000
-gpu,coco,NVIDIA GeForce RTX 3060 Ti,80,1000,1054.2,3.0914,3585.3,1163.7,0.3491,0.5499,0.3110

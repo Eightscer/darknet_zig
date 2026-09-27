@@ -1,0 +1,21 @@
+# darknet-zig benchmark: rtx3060ti_blocked
+
+- date: 2026-09-27T18:07:45Z
+- host: Linux 5.15.0-191-generic x86_64
+- cpu: Intel(R) Xeon(R) CPU E5-1680 v3 @ 3.20GHz
+
+| platform | dataset | device | gemm | classes | batches | train img/s | final loss | infer img/s | infer img/s (with decode) | top-1 | top-5 | majority-class baseline |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| cpu | mnist | CPU | ?(stale binary) | 10 | 1000 | 482.2 | 0.0649 | 1787.7 | 1732.1 | 0.9758 | 0.9996 | 0.1135 |
+| cpu | cifar10 | CPU | ?(stale binary) | 10 | 1000 | 132.2 | 1.1732 | 624.4 | 592.5 | 0.5871 | 0.9523 | 0.1000 |
+| cpu | coco | CPU | ?(stale binary) | 80 | 1000 | 32.3 | 2.9329 | 99.6 | 91.9 | 0.3445 | 0.5537 | 0.3110 |
+| gpu | mnist | NVIDIA GeForce RTX 3060 Ti | ?(stale binary) | 10 | 1000 | 8476.9 | 0.1427 | 29938.1 | 24482.8 | 0.9768 | 0.9996 | 0.1135 |
+| gpu | cifar10 | NVIDIA GeForce RTX 3060 Ti | ?(stale binary) | 10 | 1000 | 3448.5 | 1.4526 | 7256.0 | 6149.1 | 0.5808 | 0.9551 | 0.1000 |
+| gpu | coco | NVIDIA GeForce RTX 3060 Ti | ?(stale binary) | 80 | 1000 | 1054.2 | 3.0914 | 3585.3 | 1163.7 | 0.3491 | 0.5499 | 0.3110 |
+
+`infer img/s` is the network forward pass alone; the next column
+includes JPEG/PNG decode and centre-cropping, which is what an
+end-to-end pipeline actually costs. The last column is what you would
+score by always guessing the validation set's most common class.
+Throughput is per-image, so it compares across rows; top-1 only
+compares between rows that trained for the same number of batches.

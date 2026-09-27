@@ -1,0 +1,69 @@
+[    8.252047] amdgpu: vga_switcheroo: detected switching method \_SB_.PCI0.GP17.VGA_.ATPX handle
+[    8.252174] amdgpu: ATPX version 1, functions 0x00000000
+[    8.265517] amdgpu: Virtual CRAT table created for CPU
+[    8.265536] amdgpu: Topology: Add CPU node
+[    8.265664] amdgpu 0000:03:00.0: enabling device (0006 -> 0007)
+[    8.271215] [drm] add ip block number 4 <smu>
+[    8.271242] amdgpu 0000:03:00.0: amdgpu: Fetched VBIOS from VFCT
+[    8.271245] amdgpu: ATOM BIOS: 113-1HS23KXT130WMIN210508
+[    8.321767] amdgpu 0000:03:00.0: vgaarb: deactivate vga console
+[    8.321772] amdgpu 0000:03:00.0: amdgpu: Trusted Memory Zone (TMZ) feature disabled as experimental (default)
+[    8.321860] amdgpu 0000:03:00.0: amdgpu: VRAM: 8176M 0x0000008000000000 - 0x00000081FEFFFFFF (8176M used)
+[    8.321864] amdgpu 0000:03:00.0: amdgpu: GART: 512M 0x0000000000000000 - 0x000000001FFFFFFF
+[    8.321996] [drm] amdgpu: 8176M of VRAM memory ready
+[    8.321999] [drm] amdgpu: 15741M of GTT memory ready.
+[   10.734651] amdgpu 0000:03:00.0: amdgpu: STB initialized to 2048 entries
+[   10.813789] amdgpu 0000:03:00.0: amdgpu: reserve 0xa00000 from 0x81fd000000 for PSP TMR
+[   10.940335] amdgpu 0000:03:00.0: amdgpu: RAS: optional ras ta ucode is not available
+[   10.962044] amdgpu 0000:03:00.0: amdgpu: SECUREDISPLAY: securedisplay ta ucode is not available
+[   10.962063] amdgpu 0000:03:00.0: amdgpu: smu driver if version = 0x0000000f, smu fw if version = 0x00000013, smu fw program = 0, version = 0x003b3200 (59.50.0)
+[   10.962093] amdgpu 0000:03:00.0: amdgpu: use vbios provided pptable
+[   11.012276] amdgpu 0000:03:00.0: amdgpu: SMU is initialized successfully!
+[   11.018828] snd_hda_intel 0000:03:00.1: bound 0000:03:00.0 (ops amdgpu_dm_audio_component_bind_ops [amdgpu])
+[   11.107409] amdgpu: HMM registered 8176MB device memory
+[   11.108828] kfd kfd: amdgpu: Allocated 3969056 bytes on gart
+[   11.108846] kfd kfd: amdgpu: Total number of KFD nodes to be created: 1
+[   11.109035] amdgpu: Virtual CRAT table created for GPU
+[   11.109253] amdgpu: Topology: Add dGPU node [0x73ef:0x1002]
+[   11.109256] kfd kfd: amdgpu: added device 1002:73ef
+[   11.109276] amdgpu 0000:03:00.0: amdgpu: SE 2, SH per SE 2, CU per SH 8, active_cu_number 32
+[   11.109280] amdgpu 0000:03:00.0: amdgpu: ring gfx_0.0.0 uses VM inv eng 0 on hub 0
+[   11.109282] amdgpu 0000:03:00.0: amdgpu: ring gfx_0.1.0 uses VM inv eng 1 on hub 0
+[   11.109283] amdgpu 0000:03:00.0: amdgpu: ring comp_1.0.0 uses VM inv eng 4 on hub 0
+[   11.109285] amdgpu 0000:03:00.0: amdgpu: ring comp_1.1.0 uses VM inv eng 5 on hub 0
+[   11.109286] amdgpu 0000:03:00.0: amdgpu: ring comp_1.2.0 uses VM inv eng 6 on hub 0
+[   11.109288] amdgpu 0000:03:00.0: amdgpu: ring comp_1.3.0 uses VM inv eng 7 on hub 0
+[   11.109289] amdgpu 0000:03:00.0: amdgpu: ring comp_1.0.1 uses VM inv eng 8 on hub 0
+[   11.109291] amdgpu 0000:03:00.0: amdgpu: ring comp_1.1.1 uses VM inv eng 9 on hub 0
+[   11.109316] amdgpu 0000:03:00.0: amdgpu: ring comp_1.2.1 uses VM inv eng 10 on hub 0
+[   11.109318] amdgpu 0000:03:00.0: amdgpu: ring comp_1.3.1 uses VM inv eng 11 on hub 0
+[   11.109319] amdgpu 0000:03:00.0: amdgpu: ring kiq_0.2.1.0 uses VM inv eng 12 on hub 0
+
+
+initrd=\EFI\nixos\rz89hjy3k7mq0x8jsbafhj2z6p6p77mx-initrd-linux-6.12.93-initrd.efi init=/nix/store/pc3l860ih113pbscq388f5n12mfn8p8b-nixos-system-b550-25.11.20260630.b6018f8/init loglevel=4 lsm=landlock,yama,bpf
+
+
+== card1 (0000:03:00.0, 8176 MiB) ==
+
+-- clock governance (the 1200 MHz question) --
+  performance level   auto
+  sclk DPM levels     0: 500Mhz  1: 700Mhz * 2: 1200Mhz  
+  mclk DPM levels     0: 96Mhz * 1: 541Mhz  2: 675Mhz  3: 1094Mhz  
+  power profile       1 3D_FULL_SCREEN*:
+  runtime PM          auto
+  power cap / ceiling 130 / 130 W
+-- is anything else using it --
+  display connected:  card1-HDMI-A-1
+  processes on /dev/dri:
+    pid 409675  /nix/store/vijbgrzivpr2jjwglszr1pw71qc4irxr-electron-unwrapped-43.1.0/
+    pid 54058   /nix/store/3bgxnk29m4lvgdggq7d1sd680rzmx6nr-brave-origin-1.94.121/opt/
+    pid 71893   /nix/store/q57n3r71j17b1v765jzzk8m95d71ss9z-mesen-2.1.1/lib/mesen/Mese
+    pid 7966    xfce4-session 
+    pid 8000    xfwm4 
+
+-- host --
+  cpu governor        powersave
+  gpu busy now        3%
+
+no changes made; re-run with --apply (as root) to set a compute state
+
