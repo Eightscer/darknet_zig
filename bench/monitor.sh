@@ -89,8 +89,29 @@ fi
 if [ "$backend" = amd ]; then
     dev=$drm/card$card/device
     hwmon=$(echo "$dev"/hwmon/hwmon* | awk '{print $1}')
+    # freq1 is conventionally sclk, but confirm from the label rather than
+    # assume it: reading the wrong clock domain would look exactly like a
+    # card that refuses to boost.
+    sclk_node=""; sclk_label="?"
+    for f in "$hwmon"/freq*_label; do
+        [ -r "$f" ] || continue
+        if [ "$(cat "$f")" = sclk ]; then
+            sclk_node="${f%_label}_input"; sclk_label=sclk; break
+        fi
+    done
+    if [ -z "$sclk_node" ] || [ ! -r "$sclk_node" ]; then
+        sclk_node="$hwmon/freq1_input"
+        sclk_label="$(cat "$hwmon/freq1_label" 2>/dev/null || echo unlabelled)"
+    fi
     vram_mb=$(( $(cat "$dev/mem_info_vram_total") / 1048576 ))
     echo "monitoring amdgpu card$card (${vram_mb} MiB VRAM) via sysfs"
+    # Everything needed to tell a genuinely slow card from a misread node.
+    printf '  sclk from    %s (label: %s)\n' "$sclk_node" "$sclk_label"
+    printf '  dpm levels   %s\n' "$(tr '\n' ' ' < "$dev/pp_dpm_sclk" 2>/dev/null || echo unavailable)"
+    printf '  perf level   %s\n' "$(cat "$dev/power_dpm_force_performance_level" 2>/dev/null || echo unavailable)"
+    printf '  power cap    %s W (ceiling %s W)\n' \
+        "$(awk '{printf "%.0f", $1/1000000}' "$hwmon/power1_cap" 2>/dev/null || echo ?)" \
+        "$(awk '{printf "%.0f", $1/1000000}' "$hwmon/power1_cap_max" 2>/dev/null || echo ?)"
 else
     echo "monitoring $(nvidia-smi --query-gpu=name --format=csv,noheader | head -1) via nvidia-smi"
 fi
@@ -109,7 +130,7 @@ sample_amd() {
     cap=$(awk '{printf "%.0f", $1/1000000}' "$hwmon/power1_cap" 2>/dev/null || echo 0)
     while :; do
         now=$(date +%s.%N)
-        sclk=$(awk '{printf "%.0f", $1/1000000}' "$hwmon/freq1_input" 2>/dev/null || echo 0)
+        sclk=$(awk '{printf "%.0f", $1/1000000}' "$sclk_node" 2>/dev/null || echo 0)
         busy=$(cat "$dev/gpu_busy_percent" 2>/dev/null || echo 0)
         pw=$(awk '{printf "%.1f", $1/1000000}' "$hwmon/power1_average" 2>/dev/null || echo 0)
         tc=$(awk '{printf "%.0f", $1/1000}' "$hwmon/temp1_input" 2>/dev/null || echo 0)

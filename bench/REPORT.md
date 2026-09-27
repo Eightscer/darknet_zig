@@ -30,12 +30,15 @@ in `bench/results/*/raw/` and every table here can be regenerated with
    compute-bound one: 13x (AMD) and 79x (NVIDIA) on `cifar10-full`.** The
    smaller configs understate the GPU because they do not give it enough work.
 2. **Between the two GPUs the gap is a remarkably constant 2.2x in NVIDIA's
-   favour**, across every network from 0.005 to 1.624 BFLOPs and across an 8x
-   range of batch size. Three explanations were proposed and then measured
-   away -- occupancy, cache capacity, and code generation -- and the
-   specification sheets do not predict it either. The report can say precisely
-   what the bottleneck is and still cannot say why one card handles it 2.2x
-   better. See [Why NVIDIA is 2.2x AMD](#why-nvidia-is-22x-amd).
+   favour**, and the likely cause is embarrassing: **the RX 6650 XT never
+   boosts.** It held 1193 MHz against a rated 2635 MHz for a twenty-four
+   minute run, drawing 42 W of a 130 W budget at 38 C, while the RTX 3060 Ti
+   sat pinned at its power limit. Three architectural explanations were
+   proposed and measured away first -- occupancy, cache capacity and code
+   generation -- and all three failed because at its *rated* clock the AMD
+   card should be 15% **faster**, not 2.2x slower. See
+   [Why NVIDIA is 2.2x AMD](#why-nvidia-is-22x-amd); the finding is
+   provisional pending one confirmation run.
 3. **Both GPUs run at 4-6% of peak FP32, and the CPU at roughly 3%, for the
    same reason on all three backends:** the GEMM computes one output element
    per thread (GPU) or per inner iteration (CPU), so every multiply-add needs
@@ -273,9 +276,11 @@ produced packed FMAs and no speedup.
 ## Why NVIDIA is 2.2x AMD
 
 The gap exceeds what the spec sheets predict: 1.50x on FP32, 1.60x on memory
-bandwidth, against 2.2x measured. Two candidate explanations were proposed and
-then tested. **Both were wrong**, which is worth recording as carefully as a
-confirmation would have been.
+bandwidth, against 2.2x measured. Three candidate explanations were proposed and
+then tested, and **all were wrong**. The answer turned out not to be
+architectural at all: one of the two cards was never running at speed. The
+eliminations are recorded here as carefully as a confirmation would have
+been, because each one is what forced the search somewhere less flattering.
 
 ### The kernel
 
@@ -395,35 +400,79 @@ latency is occupancy. Both cards have full occupancy, so this is survivable,
 but a register-blocked rewrite (design item 1) would fix it for free by giving
 each thread several independent accumulators.
 
-### What is actually left
+### The RX 6650 XT never boosts
 
-Three explanations have now been proposed and measured away: occupancy, cache
-capacity, and code generation. The instruction streams are equivalent, so
-**the 2.2x gap is not in what the two GPUs are asked to do -- it is in how
-fast they do it.** The specification sheets do not account for that either.
-Peak FP32 favours NVIDIA by 1.50x and memory bandwidth by 1.60x, but the
-quantity this kernel actually depends on, aggregate shared-memory bandwidth,
-favours *AMD* on paper: 32 CUs x 128 B/clk x 2.635 GHz = 10.8 TB/s against
-38 SMs x 128 B/clk x 1.665 GHz = 8.1 TB/s. A kernel issuing two LDS words per
-FMA should run faster on the RX 6650 XT. It runs 2.27x slower.
+Three explanations were proposed and measured away: occupancy, cache capacity,
+and code generation. The instruction streams are equivalent, so the gap was not
+in what the two GPUs are asked to do. Sampling the clocks during a
+`cifar10-full` run (`bench/monitor.sh`, summaries in
+`results/*/monitor_output.txt`) found the difference is in what the two cards
+were *doing while asked*:
 
-What remains, none of it measured here:
+| while >=90% busy | RX 6650 XT | RTX 3060 Ti |
+|---|---|---|
+| samples | 2914 of 2920, over ~1460 s | 1151 of 1172, over 649 s |
+| median shader clock | **1193 MHz** | 1935 MHz |
+| reported ceiling | 1200 MHz (DPM table) | 2100 MHz |
+| rated boost | 2635 MHz | 1665 MHz |
+| 10th percentile | 1192 MHz | 1935 MHz |
+| mean power | **42 W of a 130 W cap** | 189 W of a 200 W cap |
+| peak temperature | **38 C** | 64 C |
+| driver throttle reasons | none | none |
 
-- **Sustained clocks.** 2635 MHz is a boost figure on a 180 W board against
-  the 3060 Ti's 200 W, and clocks were never sampled during a run. This is now
-  the leading candidate purely by elimination, and it is also the cheapest
-  thing left to check.
-- **Realised versus specified LDS throughput.** Both kernels read 16
-  consecutive words per access, touching 16 of 32 banks; how each
-  architecture services that half-width pattern, and at what latency under
-  eight waves per workgroup, is not something a datasheet answers.
-- **Barrier cost** at two `s_barrier`/`BAR.SYNC` per 16 FMAs.
+The RTX 3060 Ti behaves exactly as a healthy card should: pinned against its
+power limit at 189 of 200 W, holding 1935 MHz with a 10th percentile identical
+to the median, and *above* its 1665 MHz rated boost. There is nothing wrong
+with it and nothing throttling it.
 
-The honest summary is that this report can say with confidence *what the
-bottleneck is* -- two shared-memory words per multiply-add, on both cards, now
-verified at the instruction level -- and can rule out three explanations for
-why one card handles that bottleneck 2.2x better, without being able to name
-the fourth.
+The RX 6650 XT is drawing a third of its power budget at 38 C -- an idle
+temperature -- while the driver reports it 99.8% busy for twenty-four minutes,
+and its DPM table tops out at 1200 MHz against a rated 2635 MHz boost. It is
+not throttling in the thermal or power sense. **It appears never to leave a
+low clock state at all.**
+
+That single fact reverses the paradox. Modelling throughput as compute units
+times sustained clock:
+
+| | product | predicted NVIDIA lead |
+|---|---|---|
+| 38 SMs x 1935 MHz (measured) | 73,530 | -- |
+| 32 CUs x 1193 MHz (measured) | 38,176 | **1.93x** |
+| 32 CUs x 2635 MHz (rated) | 84,320 | 0.87x -- AMD *faster* |
+| measured performance gap | | 2.27x |
+
+At the rated clock the model says the RX 6650 XT should beat the RTX 3060 Ti
+by 15%, which is precisely why every specification-based explanation in this
+report failed. At the clock it actually ran, the model predicts a 1.93x NVIDIA
+lead against the 2.27x measured -- about 85% of the gap, leaving a 1.18x
+residual that is unremarkable for two different architectures.
+
+**This is provisional.** It rests on two sysfs sources -- the hwmon shader
+clock and the `pp_dpm_sclk` ceiling -- which agree with each other and with the
+power and temperature readings, but it has not been confirmed causally. The
+test that would confirm it is to force the card into its top performance state
+and re-measure:
+
+```sh
+D=/sys/class/drm/card1/device
+cat $D/power_dpm_force_performance_level          # record it first
+sudo sh -c "echo high > $D/power_dpm_force_performance_level"
+./bench/monitor.sh -- ./bench/benchmark.sh --platforms gpu \
+    --datasets cifar10-full --train-batches 100 --tag rx6650xt_forced
+sudo sh -c "echo auto > $D/power_dpm_force_performance_level"
+```
+
+If throughput rises and the clock follows, the 2.2x gap is a power-management
+configuration on one machine rather than anything about HIP, RDNA 2, or this
+framework's kernels -- and **every AMD number in this report understates the
+hardware by roughly a factor of two.** If the clock stays at 1200 MHz, the DPM
+table itself is capped and the cause is further upstream, in the driver or the
+board.
+
+Either way the conclusion for the *framework* is unchanged: both backends
+issue two shared-memory words per FMA and run at single-digit percentages of
+peak, and blocking the GEMM is the fix. What changes is whether the RX 6650 XT
+was ever given the chance to show what it can do.
 ## The small-network penalty
 
 Within a single card, achieved throughput varies 6x between the smallest and
@@ -611,10 +660,13 @@ for hosts whose driver lacks the JIT compiler.
 - **Each GPU has exactly one host CPU**, so "AMD vs NVIDIA end to end" is
   partly "Ryzen vs Xeon". This is why the report leans on the same-host
   speedups and the GFLOP/s normalisation rather than raw cross-machine numbers.
-- **The residual 2.2x of the NVIDIA/AMD gap is unexplained.** Occupancy,
-  cache capacity and code generation have each been measured and eliminated;
-  what remains is a list of untested candidates, not a conclusion. Clock
-  behaviour in particular was never sampled.
+- **The 2.2x NVIDIA/AMD gap is attributed but not yet confirmed.** Occupancy,
+  cache capacity and code generation were each measured and eliminated; clock
+  sampling then found the RX 6650 XT sitting at 1193 MHz of a rated 2635 MHz,
+  which accounts for about 85% of the gap. That rests on two agreeing sysfs
+  sources, not on a causal test. Until the forced-performance-level run is
+  done, **treat every AMD figure in this report as a lower bound** that may
+  understate the hardware by roughly a factor of two.
 - **`infer_load_seconds` is sensitive to filesystem cache state.** The laptop's
   CIFAR-10 decode (8741 img/s) is far below the Ryzen's (97087) by more than
   hardware explains; that run read cold from disk. The duplicated NVIDIA sweep
@@ -622,14 +674,15 @@ for hosts whose driver lacks the JIT compiler.
   within 1.1% while end-to-end throughput moved by 16%. The COCO decode figures
   are consistent between each host's CPU and GPU runs and are trustworthy; the
   MNIST and CIFAR-10 ones should not be used as decoder benchmarks.
-- **Only one configuration was measured twice.** The accidental repeat of the
-  NVIDIA sweep put run-to-run variance at 1.1% on forward throughput, with loss
-  and accuracy bit-identical. That is reassuring but it is one data point on
-  one machine; the CPU and AMD figures still have no error bars.
-- **Vendor peak FP32 figures are boost-clock marketing numbers**, and sustained
-  clocks were never sampled. The percentages of peak are indicative, not
-  precise, and clock throttling remains an unexcluded contributor to the AMD
-  gap.
+- **Repeats are now available on both GPUs and agree closely.** `cifar10-full`
+  has been run twice on each card: training 87.4 then 87.5 img/s on AMD,
+  205.9 then 205.4 on NVIDIA; inference 254.4/255.7 and 578.0/579.0. That is
+  0.5% or better, and loss and accuracy reproduce exactly. The CPU
+  configurations still have no error bars.
+- **Vendor peak FP32 figures are boost-clock marketing numbers.** Sustained
+  clocks have now been sampled, and on the AMD side the gap between rated and
+  sustained turned out to be the story rather than a footnote. The
+  percentages of peak quoted earlier are indicative, not precise.
 
 ## Reproducing this
 
@@ -677,26 +730,30 @@ machine does not relabel them with your machine.
 
 ## Further tests worth running
 
-Three of the tests originally listed here have been run, and all three came
-back negative: the batch-size sweep refuted the Infinity Cache hypothesis,
-`-Dkernel-stats=true` ruled out occupancy, and the ISA listings showed the two
-instruction streams to be equivalent. Those results are folded into
+Four of the tests originally listed here have been run. Three came back
+negative -- the batch-size sweep refuted the Infinity Cache hypothesis,
+`-Dkernel-stats=true` ruled out occupancy, and the ISA listings showed the
+two instruction streams to be equivalent -- and the fourth, clock sampling,
+found the likely answer. All four are folded into
 [Why NVIDIA is 2.2x AMD](#why-nvidia-is-22x-amd). What is left:
 
-1. **Sample clocks during a `cifar10-full` run**, with `bench/monitor.sh`:
+1. **Confirm the clock finding causally** by forcing the RX 6650 XT into its
+   top performance state and re-measuring. This is now the single most
+   valuable test in the list, because if it lands then every AMD number in
+   this report is a lower bound:
 
    ```sh
+   ./bench/gpu-prep.sh                    # what state is it in now?
+   sudo ./bench/gpu-prep.sh --apply       # runtime PM off, COMPUTE profile, perf high
    ./bench/monitor.sh -- ./bench/benchmark.sh --platforms gpu \
-       --datasets cifar10-full --train-batches 1000 --tag <machine>
+       --datasets cifar10-full --train-batches 100 --tag rx6650xt_forced
+   sudo ./bench/gpu-prep.sh --restore
    ```
 
-   Sustained-clock throttling is the leading candidate for the unexplained
-   2.2x, purely by elimination, and this is the cheapest remaining test.
-   The RX 6650 XT boosts to 2635 MHz on a 180 W board against the 3060 Ti
-   at 200 W. The number that matters is the median clock as a fraction of
-   each card's own maximum; on NVIDIA the driver also names the throttle
-   reason outright.
-
+   About three minutes. If the clock rises and throughput follows, the gap
+   is a power-management configuration rather than anything about HIP or
+   RDNA 2. If the clock stays at 1200 MHz, the DPM table is capped and the
+   cause is in the driver or the board.
 2. **Prototype the register-blocked GEMM** -- a 4x4 micro-tile per thread --
    and re-run `cifar10-full` on both cards. This is design item 1 and would
    simultaneously test the diagnosis: if the ceiling really is two shared

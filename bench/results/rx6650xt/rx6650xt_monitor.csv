@@ -1,0 +1,2 @@
+platform,dataset,device,classes,batches,train_img_per_s,train_final_loss,infer_img_per_s,infer_e2e_img_per_s,top1,top5,majority_baseline
+gpu,cifar10-full,AMD Radeon RX 6650 XT,10,1000,87.5,0.9682,255.7,254.1,0.4982,0.9395,0.1000

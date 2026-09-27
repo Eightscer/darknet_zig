@@ -280,6 +280,53 @@ and `--card N` overrides it.
 If you want `rocm-smi` anyway as a cross-check, `rocm-smi --showgpuclocks
 --showpower` works even when `get_name` does not.
 
+## Giving the GPU a clean run
+
+`gpu-prep.sh` reports, and optionally sets, the conditions an AMD card needs
+to be measured fairly. It exists because a monitored run found the RX 6650 XT
+holding 1193 MHz against a rated 2635 MHz boost -- at 42 W of a 130 W budget
+and 38 C, so not throttling, just never leaving a low clock state.
+
+```sh
+./bench/gpu-prep.sh                  # report only, no root, changes nothing
+sudo ./bench/gpu-prep.sh --apply     # compute-focused state, saving the old one
+#   ... run the benchmark ...
+sudo ./bench/gpu-prep.sh --restore   # put it back exactly
+```
+
+The report covers the three things that make a GPU benchmark unrepresentative:
+**clock governance** (performance level, the sclk and mclk DPM tables, the
+active power profile, runtime PM, power caps), **contention** (whether a
+display is connected to this card, and every process holding an
+`/dev/dri` node), and **host state** (CPU governor, current GPU busy).
+
+`--apply` changes exactly three things, in this order, recording each previous
+value to `/tmp/darknet-gpu-prep.state`:
+
+1. `power/control` to `on`, so the device cannot runtime-suspend. A card being
+   power-managed will not hold a raised DPM level.
+2. `pp_power_profile_mode` to the `COMPUTE` profile. The default profile's
+   heuristics are tuned for graphics, and a compute kernel that leaves the
+   shader array waiting on LDS -- which is exactly what this framework's GEMM
+   does -- can look idle enough not to warrant boosting.
+3. `power_dpm_force_performance_level` to `high`. The blunt instrument, and
+   the one that actually tests the hypothesis.
+
+`--restore` replays the saved file in reverse and deletes it. Nothing is
+changed without `--apply`, and `--apply` is refused without root.
+
+Beyond what the script touches, two things are worth doing by hand on a
+machine that will be benchmarked repeatedly. If the card drives a display,
+move the monitor to the integrated GPU or stop the display manager and run
+from a TTY -- a compositor both competes for the GPU and pins it to
+display-friendly power states. And on a system with more than one AMD device,
+which includes every Ryzen APU desktop, set `HIP_VISIBLE_DEVICES` so the
+iGPU can never be selected by accident:
+
+```sh
+HIP_VISIBLE_DEVICES=0 ./bench/benchmark.sh --platforms gpu --datasets cifar10-full
+```
+
 ## Notes
 
 `get-data.sh` downloads to a `.part` file and renames it only after curl
