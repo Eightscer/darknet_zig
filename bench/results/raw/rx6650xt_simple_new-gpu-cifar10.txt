@@ -1,0 +1,23 @@
+GEMM: register-blocked kernel disabled by $DARKNET_GEMM_SIMPLE
+backend=HIP
+device=AMD Radeon RX 6650 XT
+device_memory_mib=8176
+gemm=simple
+net=cifar10
+classes=10
+train_batch=128
+train_pool_images=50000
+train_batches=1000
+train_images=128000
+train_seconds=35.556
+train_images_per_sec=3599.9
+train_mean_loss=1.4136
+train_final_loss=1.4284
+infer_batch=128
+infer_images=10000
+infer_forward_seconds=1.056
+infer_forward_images_per_sec=9472.5
+infer_load_seconds=0.066
+infer_end_to_end_images_per_sec=8912.2
+top1=0.5795
+top5=0.9535
