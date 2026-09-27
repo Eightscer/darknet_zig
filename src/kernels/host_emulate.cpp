@@ -17,7 +17,11 @@ static thread_local dim3i threadIdx_, blockIdx_;
 #define __global__
 #define __device__
 #define __forceinline__ inline
-#define __shared__ static
+// alignas leads, so that `__shared__ __align__(16) float x[]` expands to a
+// well-formed declaration; the explicit attribute then has nothing left to do.
+#define __shared__ alignas(16) static
+#define __align__(n)
+#define __launch_bounds__(...)
 struct float4 { float x, y, z, w; };
 static std::barrier<> *g_bar = nullptr;
 #define __syncthreads() g_bar->arrive_and_wait()

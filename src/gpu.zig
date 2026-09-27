@@ -70,6 +70,14 @@ pub const gemm_block_tile: u32 = gemm_tile * 4;
 /// convolution in a small network has m = 16 filters, which lands here.
 const gemm_block_min: usize = 64;
 
+/// Set from $DARKNET_GEMM_SIMPLE at init, so the two GEMM kernels can be
+/// compared on one build without a rebuild. The blocked kernel should win
+/// on anything compute-bound; this exists because that claim is worth being
+/// able to check on a machine rather than asserting from an instruction
+/// count, and because an earlier version of it lost badly on exactly the
+/// shapes it was supposed to help.
+var gemm_simple_only: bool = false;
+
 /// A device-side float array. A null pointer means "this layer doesn't use
 /// this buffer", the same convention the host-side empty slices follow.
 pub const Buf = struct {
@@ -290,6 +298,8 @@ pub fn init(allocator: std.mem.Allocator, index: i32) !void {
     var total_mem: usize = 0;
     _ = api.memInfo(&free_mem, &total_mem);
     device_total_mib = total_mem >> 20;
+    gemm_simple_only = std.c.getenv("DARKNET_GEMM_SIMPLE") != null;
+    if (gemm_simple_only) sys.print("GEMM: register-blocked kernel disabled by $DARKNET_GEMM_SIMPLE\n", .{});
     std.debug.print("{s} device {d}: {s} ({d} MiB free / {d} MiB total)\n", .{
         api.label,
         index,
@@ -640,7 +650,7 @@ pub fn gemm(
     // The register-blocked kernel issues 0.5 shared-memory words per
     // multiply-add against the simple kernel's 2.0, but only pays off when
     // both dimensions can fill its wider tile.
-    if (m >= gemm_block_min and n >= gemm_block_min) {
+    if (!gemm_simple_only and m >= gemm_block_min and n >= gemm_block_min) {
         const bx: u32 = @intCast((n + gemm_block_tile - 1) / gemm_block_tile);
         const by: u32 = @intCast((m + gemm_block_tile - 1) / gemm_block_tile);
         launchDims(kernels.gemm_block_kernel, bx, by, gemm_tile, gemm_tile, .{

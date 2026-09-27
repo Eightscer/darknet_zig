@@ -720,43 +720,70 @@ backend difference.
 
 Ranked by expected return.
 
-**1. Block the GEMM. Done -- this was the whole ballgame.** Both backends used
-to compute one output element per unit of work, so every multiply-add paid for
-its own operand loads: 0.17 flops/byte on the CPU, and exactly two
-shared-memory words per FMA on the GPU, counted in both ISAs.
+**1. Block the GEMM. Implemented; a clear win on the CPU, unresolved on the
+GPU.** Both backends used to compute one output element per unit of work, so
+every multiply-add paid for its own operand loads: 0.17 flops/byte on the CPU,
+and exactly two shared-memory words per FMA on the GPU, counted in both ISAs.
 
-On the GPU, `gemm_block_kernel` now gives each thread a 4x4 square of the
-output in registers, so one row of `a` and one column of `b` feed sixteen
-multiply-adds. The compiled ISA confirms the intent: 256 FMAs against 32
-`ds_read_b128` per tile step, **0.5 words per FMA**, a 4x improvement. It costs
-58 VGPRs on gfx1032 with no spills and **no loss of occupancy at all** (still
-16 waves/SIMD), and 64 registers on sm_86, which does drop Ampere from 100% to
-67% occupancy -- the usual register-blocking trade, and one the measurements
-will settle. `gpu.gemm` dispatches to it only when both `m` and `n` reach 64,
-below which the wider tile would be mostly padding.
+**The CPU change worked.** `gemmPanel` accumulates four rows of `C` at once in
+explicit `@Vector` registers across the whole of `k`, so each element of `C` is
+read and written once per panel instead of once per step of `k`, and writing
+the vectors by hand sidesteps the aliasing analysis that stopped LLVM
+vectorising the old loop. The binary went from 41 scalar FMAs and zero packed
+ones to emitting packed FMAs in the hot path. Measured on two hosts:
 
-On the CPU, `gemmPanel` accumulates four rows of `C` at once in explicit
-`@Vector` registers across the whole of `k`. That fixes both problems at once:
-each element of `C` is now read and written once per panel instead of once per
-step of `k`, and writing the vectors by hand sidesteps the aliasing analysis
-that stopped LLVM vectorising the old loop. The binary went from 41 scalar
-FMAs and zero packed ones to emitting packed FMAs in the hot path. Measured on
-the laptop i7-1185G7:
-
-| | training | inference |
+| | Ryzen 7 5700G | Xeon E5-1680 v3 |
 |---|---|---|
-| MNIST | 465.6 -> **612.4** (1.32x) | 1275.1 -> **2521.9** (1.98x) |
-| CIFAR-10 | 94.2 -> **156.4** (1.66x) | 230.5 -> **852.5** (3.70x) |
+| MNIST train / infer | 1.27x / 1.56x | 1.44x / 1.70x |
+| CIFAR-10 train / infer | 1.55x / 1.80x | 1.56x / **2.79x** |
+| COCO train / infer | 1.35x / 1.36x | 1.40x / 1.60x |
 
 Inference gains more than training because the backward-weights path
-(`gemmNT`, a dot-product shape) was left alone. CIFAR-10 gains more than MNIST
-because its convolutions have a larger `K` for the panel to amortise against.
-`train_mean_loss` on MNIST is unchanged at 0.1742 and top-1 moved by 0.02
-points, consistent with LLVM reassociating an accumulator that now lives in a
-register; prediction on `dog.jpg` is still byte-identical to upstream darknet.
+(`gemmNT`, a dot-product shape) was left alone. Prediction on `dog.jpg` is
+still byte-identical to upstream darknet.
 
-Still worth doing: the same treatment for `gemmNT`, and on the GPU an
-`m`-aware tile so the small first layers get some of the benefit too.
+**The first GPU attempt was slower than what it replaced**, which is worth
+recording rather than quietly fixing. `gemm_block_kernel` gives each thread a
+4x4 square of the output in registers, and the compiled ISA confirmed the
+intent -- 256 FMAs against 32 `ds_read_b128` per tile step, 0.5 words per FMA,
+a 4x improvement. It still lost:
+
+| | RX 6650 XT | RTX 3060 Ti |
+|---|---|---|
+| MNIST inference | 0.97x | 0.96x |
+| CIFAR-10 inference | **0.65x** | **0.56x** |
+| COCO inference | 0.83x | 0.81x |
+| cifar10-full training | 1.29x | -- |
+
+The shape of that table is the diagnosis. Inference regressed much harder than
+training on both cards, and inference is entirely `TA = 0` forward GEMMs while
+training mixes in `TA = 1` and `TB = 1`. The tile-load loop indexed so that
+consecutive threads took consecutive *rows* of A, which is the contiguous axis
+only when A is transposed; for `TA = 0` every lane in a wave read an address
+`lda` apart, so each tile load became sixty-four memory transactions instead
+of one. Four times the arithmetic intensity does not survive that.
+
+The host emulation that verified this kernel could not have caught it, and
+says so: it checks index arithmetic, tiling, bounds and the transpose flags,
+and explicitly cannot check coalescing. Arithmetic-intensity counting from the
+ISA could not have caught it either, because the instruction mix was correct.
+Only running it on a GPU found it.
+
+Three fixes followed, all re-verified bit-identical against the original
+kernel: the load mapping now picks its axis from the transpose flags so both
+operands are read along their contiguous dimension; the shared tiles are
+padded to a 68-float stride, which turns a 16-way bank conflict on every tile
+write into a 2-way one while keeping the rows 16-byte aligned for the float4
+reads; and `__launch_bounds__(256, 4)` holds ptxas to 64 registers instead of
+92, recovering NVIDIA occupancy from a third to two thirds. AMD sits at 68
+VGPRs and 12 waves/SIMD, neither card spills.
+
+**Whether that is enough is not yet known.** `$DARKNET_GEMM_SIMPLE=1` disables
+the blocked kernel at run time so both can be compared on one build without a
+rebuild, which is the cheap way to settle it.
+
+Still worth doing: the same treatment for `gemmNT`, and an `m`-aware GPU tile
+so the small first layers get some benefit too.
 
 **2. Fuse the elementwise kernels.** Bias, batch-norm scale/shift and
 activation are separate launches, each streaming the whole activation tensor

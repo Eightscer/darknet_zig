@@ -664,17 +664,32 @@ extern "C" __global__ void gemm_kernel(int TA, int TB, int M, int N, int K, floa
 // it to two shared instructions per thread per step and sidestep the bank
 // conflicts a strided scalar read of the same data would hit.
 //
+// `__launch_bounds__` is load-bearing on NVIDIA: without the min-blocks hint
+// ptxas settles on 92 registers and a third of the occupancy, with it 64 and
+// two thirds, in both cases without spilling. ROCm schedules it at 12
+// waves/SIMD either way.
+//
 // The block covers BTILE x BTILE of C with TILE x TILE threads, so BTILE must
 // equal TILE * BMICRO. Shared memory is 2 * TILE * BTILE floats = 8 KB, well
 // inside both architectures' budgets at this occupancy.
 #define BMICRO 4
 #define BTILE (TILE * BMICRO)
 
-extern "C" __global__ void gemm_block_kernel(int TA, int TB, int M, int N, int K, float ALPHA,
+// Padding on the shared tiles' row stride. Without it the row stride is 64
+// floats, a multiple of the 32 banks, so the sixteen lanes that write one
+// column of As all land on the same bank -- a 16-way conflict on every tile
+// load. A stride of 68 spreads them over eight banks instead, and 68*4 = 272
+// bytes keeps every row 16-byte aligned, which the float4 reads below need.
+#define BPAD 4
+#define BSTRIDE (BTILE + BPAD)
+
+extern "C" __global__ __launch_bounds__(TILE * TILE, 4) void gemm_block_kernel(int TA, int TB, int M, int N, int K, float ALPHA,
                                              const float *A, int lda, const float *B, int ldb,
                                              float BETA, float *C, int ldc) {
-    __shared__ float As[TILE][BTILE];
-    __shared__ float Bs[TILE][BTILE];
+    // The float4 reads below require 16-byte alignment; a float array only
+    // guarantees 4, so ask for it rather than rely on the compiler choosing it.
+    __shared__ __align__(16) float As[TILE][BSTRIDE];
+    __shared__ __align__(16) float Bs[TILE][BSTRIDE];
 
     const int tx = threadIdx.x;
     const int ty = threadIdx.y;
@@ -692,16 +707,35 @@ extern "C" __global__ void gemm_block_kernel(int TA, int TB, int M, int N, int K
         // TILE*BTILE elements per tile, TILE*TILE threads: BMICRO loads each.
         // Indexing so consecutive threads fill consecutive columns keeps both
         // the global reads and the shared writes coalesced.
-        #pragma unroll
+        // Deliberately not unrolled: unrolling keeps all four iterations' index
+        // state live across the compute phase below, which cost 28 extra
+        // registers on sm_86 and a third of the occupancy.
         for (int l = 0; l < BMICRO; ++l) {
             const int idx = tid + l * (TILE * TILE);
-            const int kk = idx / BTILE;
-            const int ii = idx % BTILE;
-            const int ak = t + kk;
-            const int ar = row0 + ii;
-            const int bc = col0 + ii;
-            As[kk][ii] = (ar < M && ak < K) ? a_at(A, TA, lda, ar, ak) : 0.f;
-            Bs[kk][ii] = (bc < N && ak < K) ? b_at(B, TB, ldb, ak, bc) : 0.f;
+            // Which axis consecutive threads walk decides whether a tile load
+            // is one memory transaction or sixty-four of them, and the
+            // contiguous axis depends on the transpose flag. The flags are
+            // uniform across the block, so these branches cost nothing.
+            int ar_i, ak_i;
+            if (TA) {          // A is K x M: consecutive rows are contiguous
+                ak_i = idx / BTILE;
+                ar_i = idx % BTILE;
+            } else {           // A is M x K: consecutive k are contiguous
+                ar_i = idx / TILE;
+                ak_i = idx % TILE;
+            }
+            int bc_i, bk_i;
+            if (TB) {          // B is N x K: consecutive k are contiguous
+                bc_i = idx / TILE;
+                bk_i = idx % TILE;
+            } else {           // B is K x N: consecutive columns are contiguous
+                bk_i = idx / BTILE;
+                bc_i = idx % BTILE;
+            }
+            const int ar = row0 + ar_i, ak = t + ak_i;
+            const int bc = col0 + bc_i, bk = t + bk_i;
+            As[ak_i][ar_i] = (ar < M && ak < K) ? a_at(A, TA, lda, ar, ak) : 0.f;
+            Bs[bk_i][bc_i] = (bc < N && bk < K) ? b_at(B, TB, ldb, bk, bc) : 0.f;
         }
         __syncthreads();
 
