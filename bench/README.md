@@ -221,11 +221,12 @@ dump), `kernel_info.txt` (per-kernel register, spill and occupancy data
 from `-Dkernel-stats=true`) and the disassembled device code (`*.s`), plus a
 `_sweep` table from the batch-size sweep.
 
-**[`REPORT.md`](REPORT.md) is the full CPU vs HIP vs CUDA analysis** of
-those runs -- where each backend spends its time, why both GPUs sit at
-single-digit percentages of peak, why the faster GPU lost the COCO
-end-to-end number, and how most of the AMD figures turned out to have been
-taken on a card whose dual-BIOS switch was set to a mining profile.
+**[`REPORT.md`](REPORT.md) is the full CPU vs HIP vs CUDA analysis** of these
+runs: where each backend spends its time, why the faster GPU lost the COCO
+end-to-end number, how most of the AMD figures turned out to have been taken
+on a card whose dual-BIOS switch was set to a mining profile, and what
+register-blocking the GEMM was worth once all of that was untangled. It ends
+with future work and the commands for picking it back up.
 
 `results/laptop-cpu.md` is the CPU run described above. Two things in it
 are worth reading carefully rather than at a glance:

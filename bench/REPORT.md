@@ -23,6 +23,8 @@ in `bench/results/*/raw/` and every table here can be regenerated with
 - [Design considerations](#design-considerations)
 - [Threats to validity](#threats-to-validity)
 - [Reproducing this](#reproducing-this)
+- [Future work](#future-work)
+- [Closing notes](#closing-notes)
 
 ## The short version
 
@@ -44,17 +46,20 @@ in `bench/results/*/raw/` and every table here can be regenerated with
    compute-bound one.** On `cifar10-full`, 79x for NVIDIA and, with the card
    working, roughly 28x for AMD. The smaller configs understate both because
    they do not give the GPU enough work.
-4. **Both GPUs run at single-digit percentages of peak FP32, and the CPU at
-   roughly 3%, for the same reason on all three backends:** the GEMM computes
-   one output element per thread (GPU) or per inner iteration (CPU), so every
-   multiply-add needs its own operand loads. On the GPUs this is verified at
-   the instruction level -- both ISAs issue exactly **two 32-bit
-   shared-memory words per FMA** -- with zero register spills and full
-   occupancy, so the ceiling is algorithmic rather than a tuning problem.
-   Fixing it is the framework's single largest performance lever, and it is
-   the one conclusion here that none of the hardware drama touches.
-5. **The CPU GEMM emits no vector instructions at all** -- 41 scalar FMAs and
-   zero packed ones in the compiled binary, on machines with 8-wide AVX2.
+4. **Both GEMMs computed one output element per unit of work, and that was
+   the ceiling on all three backends.** Every multiply-add paid for its own
+   operand loads: 0.17 flops/byte on the CPU, and exactly two 32-bit
+   shared-memory words per FMA on the GPU, counted in both ISAs with no
+   register spills and full occupancy. Register blocking was then implemented
+   against that diagnosis and measured: **1.3-2.8x on the CPU across two
+   hosts**, and 1.4-1.7x on GPU training of the large network, though it loses
+   on small ones and is now gated on problem size. See
+   [Design considerations](#design-considerations).
+5. **The CPU GEMM used to emit no vector instructions at all** -- 41 scalar
+   FMAs and zero packed ones in the compiled binary, on machines with 8-wide
+   AVX2, because LLVM would not hoist an alias check out of the `k` loop.
+   Hand-written `@Vector` panels fixed both that and the arithmetic intensity
+   behind it.
 6. **On COCO the RTX 3060 Ti system was slower end to end than the RX 6650 XT
    system even while the AMD card was crippled**, because the Xeon host cannot
    decode JPEGs fast enough to feed it: 3.28 s of decode against 0.95 s of
@@ -580,7 +585,7 @@ was taken on the mining BIOS and understates the card**, most likely by
 something near 2x but not necessarily by exactly that: the smaller networks
 are latency- and bandwidth-bound rather than clock-bound, so they may gain
 less. Those rows are marked where they appear, and re-running the suite is
-the first item under [Further tests](#further-tests-worth-running).
+item 4 under [Future work](#future-work).
 
 Nothing about the *framework* conclusions changes. Both backends still issue
 two shared-memory words per FMA, confirmed at the instruction level; both
@@ -742,45 +747,62 @@ Inference gains more than training because the backward-weights path
 (`gemmNT`, a dot-product shape) was left alone. Prediction on `dog.jpg` is
 still byte-identical to upstream darknet.
 
-**The first GPU attempt was slower than what it replaced**, which is worth
-recording rather than quietly fixing. `gemm_block_kernel` gives each thread a
-4x4 square of the output in registers, and the compiled ISA confirmed the
-intent -- 256 FMAs against 32 `ds_read_b128` per tile step, 0.5 words per FMA,
-a 4x improvement. It still lost:
+**The GPU change needed two rounds and a threshold.** `gemm_block_kernel`
+gives each thread a 4x4 square of the output in registers, and the compiled
+ISA confirmed the intent -- 256 FMAs against 32 `ds_read_b128` per tile step,
+0.5 words per FMA against the simple kernel's 2.0. The first version was
+nonetheless slower on almost everything: 0.65x on CIFAR-10 inference on the
+RX 6650 XT, 0.56x on the RTX 3060 Ti.
+
+The shape of that failure was the diagnosis. Inference regressed much harder
+than training on both cards, and inference is entirely `TA = 0` forward GEMMs
+while training mixes in `TA = 1` and `TB = 1`. The tile-load loop indexed so
+consecutive threads took consecutive *rows* of A, which is the contiguous axis
+only when A is transposed; for `TA = 0` every lane read an address `lda`
+apart, so each tile load became sixty-four memory transactions instead of one.
+Four times the arithmetic intensity does not survive that. Three fixes
+followed -- an axis chosen from the transpose flags, a 68-float shared stride
+that turns a 16-way bank conflict on tile writes into a 2-way one while
+keeping rows 16-byte aligned for the float4 reads, and `__launch_bounds__(256,
+4)` holding ptxas to 64 registers instead of 92 -- together worth 11-23%:
+
+| `cifar10-full`, blocked kernel | first version | after the fixes |
+|---|---|---|
+| RX 6650 XT train / infer | 229.9 / 484.6 | **255.9 / 590.4** |
+| RTX 3060 Ti train / infer | 295.2 / 574.1 | **340.4 / 706.7** |
+
+That was still not enough to make it win everywhere. Measured against the
+simple kernel on the same binary, switched at run time:
 
 | | RX 6650 XT | RTX 3060 Ti |
 |---|---|---|
-| MNIST inference | 0.97x | 0.96x |
-| CIFAR-10 inference | **0.65x** | **0.56x** |
-| COCO inference | 0.83x | 0.81x |
-| cifar10-full training | 1.29x | -- |
+| `cifar10` train | 0.81x | 0.92x |
+| `cifar10` inference | **0.65x** | **0.77x** |
+| `cifar10-full` train | **1.43x** | **1.66x** |
+| `cifar10-full` inference | **1.12x** | **1.22x** |
 
-The shape of that table is the diagnosis. Inference regressed much harder than
-training on both cards, and inference is entirely `TA = 0` forward GEMMs while
-training mixes in `TA = 1` and `TB = 1`. The tile-load loop indexed so that
-consecutive threads took consecutive *rows* of A, which is the contiguous axis
-only when A is transposed; for `TA = 0` every lane in a wave read an address
-`lda` apart, so each tile load became sixty-four memory transactions instead
-of one. Four times the arithmetic intensity does not survive that.
+So it is worth roughly 1.4-1.7x on training the large network and loses a
+third of inference throughput on the small one. The kernel produces sixteen
+outputs per thread and therefore launches sixteen times fewer threads; below
+some amount of work there are not enough left to cover the tile-load latency.
+`gpu.gemm` now gates on total multiply-adds, `m * n * k >= 2e9`, on top of
+requiring both `m` and `n` to reach 64.
 
-The host emulation that verified this kernel could not have caught it, and
-says so: it checks index arithmetic, tiling, bounds and the transpose flags,
-and explicitly cannot check coalescing. Arithmetic-intensity counting from the
-ISA could not have caught it either, because the instruction mix was correct.
-Only running it on a GPU found it.
+That threshold is measured rather than derived, and it is fitted to two
+configurations. Per layer at batch 128, `cifar10`'s GEMMs top out at 9.3e8 and
+`cifar10-full`'s substantial ones start at 7.4e9 -- an eightfold gap with
+nothing measured inside it. `$DARKNET_GEMM_BLOCK_MIN` overrides it so the gap
+can be swept without a rebuild, and a third network would be worth more than
+any amount of reasoning about where in it the line belongs.
 
-Three fixes followed, all re-verified bit-identical against the original
-kernel: the load mapping now picks its axis from the transpose flags so both
-operands are read along their contiguous dimension; the shared tiles are
-padded to a 68-float stride, which turns a 16-way bank conflict on every tile
-write into a 2-way one while keeping the rows 16-byte aligned for the float4
-reads; and `__launch_bounds__(256, 4)` holds ptxas to 64 registers instead of
-92, recovering NVIDIA occupancy from a third to two thirds. AMD sits at 68
-VGPRs and 12 waves/SIMD, neither card spills.
-
-**Whether that is enough is not yet known.** `$DARKNET_GEMM_SIMPLE=1` disables
-the blocked kernel at run time so both can be compared on one build without a
-rebuild, which is the cheap way to settle it.
+Two pieces of tooling came out of getting this wrong. `src/kernels/verify.sh`
+runs a block's 256 threads as real threads against a `std::barrier` and checks
+the blocked kernel is bit-identical to the simple one; it caught nothing here,
+because the bug was in memory access patterns, which it explicitly cannot see.
+What did catch it was running on a GPU. And every run now records `gemm=` and
+`gemm_block_min_work=`, because the first attempt at this comparison silently
+measured one kernel twice against a stale binary, and produced four tables
+that agreed to within 0.1% while appearing to say something.
 
 Still worth doing: the same treatment for `gemmNT`, and an `m`-aware GPU tile
 so the small first layers get some benefit too.
@@ -907,53 +929,126 @@ Provenance (date, host, CPU) is recorded in `<tag>.meta` when the run happens
 and read back by `--from-raw`, so re-rendering someone else's results on your
 machine does not relabel them with your machine.
 
-## Further tests worth running
+## Future work
 
-Six of the tests originally listed here have been run. Four came back
-negative -- the batch-size sweep refuted the Infinity Cache hypothesis,
-`-Dkernel-stats=true` ruled out occupancy, the ISA listings showed the two
-instruction streams to be equivalent, and a quiesced re-run ruled out
-contention. Clock sampling then found the symptom, and reading the card's
-ROM in both dual-BIOS positions found the cause. All six are folded into
-[The AMD card was running a mining BIOS](#the-amd-card-was-running-a-mining-bios). What is left:
+In rough order of what it would add.
 
-1. **Re-run the whole AMD suite on the 143 W BIOS.** This is now the only thing
-   standing between this report and a clean comparison. Every AMD row except
-   `cifar10-full` was measured on the mining BIOS:
+### 1. Settle the GPU dispatch threshold
 
-   ```sh
-   ./bench/benchmark.sh --platforms cpu,gpu --datasets mnist,cifar10,coco \
-       --train-batches 1000 --tag rx6650xt_bios143_full
-   ./bench/benchmark.sh --platforms gpu --datasets cifar10-full \
-       --train-batches 1000 --tag rx6650xt_bios143_full --append
-   for b in 16 32 64; do
-       ./bench/benchmark.sh --platforms gpu --datasets cifar10-fullb$b \
-           --train-batches 200 --tag rx6650xt_bios143_sweep --append
-   done
-   ```
+`gpu.gemm` sends work to the register-blocked kernel when `m >= 64`,
+`n >= 64` and `m * n * k >= 2e9`. That last number is measured, not derived,
+and it is fitted to exactly two configurations: `cifar10`'s per-layer GEMMs
+top out at 9.3e8 and lose 0.65-0.92x with the blocked kernel, `cifar10-full`'s
+substantial ones start at 7.4e9 and win 1.12-1.66x. Nothing has been measured
+in the eightfold gap between.
 
-   About an hour, most of it the CPU baseline. Worth predicting in advance:
-   `cifar10-full` should land near 2x its old figure, but the small networks
-   are latency- and bandwidth-bound rather than clock-bound and should gain
-   noticeably less. If they gain the full 2x as well, the small-network
-   penalty analysis in this report needs revisiting too.
+`$DARKNET_GEMM_BLOCK_MIN` overrides the threshold at run time, so the gap can
+be swept on one build:
 
-2. **Prototype the register-blocked GEMM** -- a 4x4 micro-tile per thread --
-   and re-run `cifar10-full` on both cards. This is design item 1 and would
-   simultaneously test the diagnosis: if the ceiling really is two shared
-   words per FMA, the fix should move both cards several-fold.
+```sh
+# Where does the crossover actually sit? COCO is the interesting case: its
+# GEMMs straddle the current threshold, so it should be the most sensitive.
+for w in 100000000 500000000 2000000000 8000000000 100000000000; do
+    DARKNET_GEMM_BLOCK_MIN=$w ./bench/benchmark.sh --platforms gpu \
+        --datasets coco,cifar10,cifar10-full --train-batches 300 \
+        --tag <machine>_thresh_$w
+done
+```
 
-3. **Repeat runs on the CPU configurations**, which still have no error bars.
-   Both GPUs now have them: `cifar10-full` was measured three times on the
-   RX 6650 XT (87.4 / 87.5 / 88.1 img/s training) and twice on the RTX 3060 Ti
-   (205.9 / 205.4), so GPU variance is under 1%.
+The last value is effectively "never blocked" and the first "always"; the
+recorded `gemm_block_min_work` field makes each table self-describing. About
+half an hour per card. A third network -- ideally one whose layers land inside
+the gap -- would be worth more than any further reasoning about where the line
+belongs.
 
-4. **The RTX 3060 Ti in a modern host, or the RX 6650 XT in the Xeon box** --
-   any swap that breaks the one-GPU-one-CPU confound.
+Two cheaper checks worth doing at the same time:
 
-Nothing further is needed on the static side. The CPU assembly, the PTX, the
-per-kernel resource statistics and both GPU ISA listings are in the
-repository, and between them they establish what the bottleneck is: two
-shared-memory words per multiply-add, on both architectures, confirmed at the
-instruction level. The performance *gap* between the two cards turned out not
-to be a property of the code at all.
+```sh
+# Confirm the binary is current and the switch works before spending an hour.
+./zig-out/bin/darknet-zig benchmark bench/data/cifar10/cifar10.data \
+    bench/cfg/cifar10.cfg -gpu 0 -train-batches 2 -infer-images 256 | grep '^gemm'
+DARKNET_GEMM_SIMPLE=1 ./zig-out/bin/darknet-zig benchmark bench/data/cifar10/cifar10.data \
+    bench/cfg/cifar10.cfg -gpu 0 -train-batches 2 -infer-images 256 | grep '^gemm'
+```
+
+Expect `gemm=blocked` then `gemm=simple`. A missing line means a binary older
+than this work, which is how the first attempt at this comparison silently
+measured one kernel twice.
+
+### 2. Finish the blocking
+
+Three pieces were left undone. `gemmNT` and `gemmTT` on the CPU still use the
+original dot-product shape; they are the backward-weights path, which is why
+CPU training gained less than CPU inference (1.3-1.6x against 1.4-2.8x). On
+the GPU an `m`-aware tile -- 32x64 as well as 64x64 -- would let the small
+first layers use a blocked kernel instead of falling back. And the blocked
+kernel is gated off entirely below the work threshold, where a smaller micro-
+tile might still beat one output per thread.
+
+### 3. Fuse the elementwise kernels
+
+Bias, batch-norm scale/shift and activation are separate launches, each
+streaming the whole activation tensor through memory. On the small networks
+these dominate: MNIST reaches 157 GFLOP/s where `cifar10-full` reaches 939 on
+the same card, and the difference is not the convolutions. Fusing them into
+the convolution epilogue removes several full passes over the largest tensors
+in the network. This is the obvious next lever now that the GEMM has been
+addressed.
+
+### 4. Re-measure AMD on the working BIOS
+
+Only `cifar10-full`, `cifar10` and COCO have been re-run since the dual-BIOS
+switch was flipped. The MNIST and batch-sweep rows still describe a card at
+45% of its rated clock and are marked as such throughout.
+
+### 5. Repeat runs on the CPU configurations
+
+Both GPUs have error bars now -- `cifar10-full` was measured three times on
+the RX 6650 XT (87.4 / 87.5 / 88.1 img/s training) and twice on the RTX 3060
+Ti (205.9 / 205.4), so GPU variance is under 1%. The CPU numbers are single
+runs.
+
+### 6. Break the one-GPU-one-CPU confound
+
+Each card has exactly one host, so "AMD versus NVIDIA end to end" is partly
+"Ryzen versus Xeon". Any swap would separate them.
+
+## Closing notes
+
+The measurement apparatus turned out to matter more than the measurements.
+Four of the conclusions in this report were wrong when first written, and each
+was caught by a different instrument:
+
+- **A constant 2.2x NVIDIA lead** that survived three architectural
+  explanations, all of them eliminated by measurement, and turned out to be a
+  mining BIOS capping one card at 45% of its rated clock. Found by sampling
+  clocks during a run, which nothing else would have shown.
+- **An Infinity Cache hypothesis** that predicted the gap would narrow at
+  small batch sizes. It did not move at all. Refuted by a ten-minute sweep.
+- **A register-blocked GPU kernel** that was bit-identical to the one it
+  replaced, issued a quarter of the shared-memory traffic per FMA, and ran
+  *slower*, because its tile loads were uncoalesced. Neither the host
+  emulator nor the instruction counts could see that; only a GPU could.
+- **An A/B comparison** of those two kernels that produced four tables
+  agreeing to within 0.1%, because all four runs used the same stale binary.
+
+The pattern is that static analysis was reliable about *what the code does*
+and useless about *what the machine does with it*, and that every honest
+number in this report came from running the thing on the hardware in
+question. The tooling that survives -- `monitor.sh` for clocks,
+`gpu-prep.sh` for a clean device, `verify.sh` for kernel correctness without a
+GPU, `-Dkernel-stats` for occupancy, and the `gemm=` and
+`gemm_block_min_work=` fields recorded in every run -- exists because each of
+those four was expensive to find once and should be cheap to rule out next
+time.
+
+What holds up, and would hold up on other hardware: the arithmetic-intensity
+analysis of the GEMM, verified at the instruction level on two unrelated ISAs;
+the CPU speedups, 1.3-2.8x on two different microarchitectures; the
+observation that a fast GPU paired with a slow decoder is a slow system; and
+the agreement of all three backends to within 0.4 accuracy points, which is
+the best evidence here that the port is faithful.
+
+What does not generalise: every absolute GPU figure, which belongs to two
+specific cards in two specific machines, one of which spent most of this study
+misconfigured.
