@@ -153,8 +153,10 @@ see [`bench/README.md`](bench/README.md):
 ```
 
 Measured results for a Radeon RX 6650 XT (HIP), a GeForce RTX 3060 Ti
-(CUDA) and three CPUs, with an analysis of where each backend spends its
-time, are in [`bench/REPORT.md`](bench/REPORT.md).
+(CUDA) and three CPUs are in [`bench/REPORT.md`](bench/REPORT.md), along
+with an analysis of where each backend spends its time -- both GPUs reach
+only 5-8% of peak FP32, for a reason the report tracks down to two words of
+shared memory per multiply-add in the compiled ISA of each.
 
 ## Trying it on a CPU
 

@@ -214,7 +214,7 @@ measured so far:
 |---|---|---|---|
 | `results/` | Core i7-1185G7 | -- | CPU only |
 | `results/rx6650xt/` | Ryzen 7 5700G | Radeon RX 6650 XT (gfx1032) | HIP |
-| `results/rtx3060ti/` | Xeon E5-1680 v3 | GeForce RTX 3060 Ti | CUDA |
+| `results/rtx3060ti/` | Xeon E5-1680 v3 | GeForce RTX 3060 Ti | CUDA (retired) |
 
 Each GPU directory also holds `info.txt` (host `nproc` and the vendor SMI
 dump), `kernel_info.txt` (per-kernel register, spill and occupancy data
@@ -222,11 +222,17 @@ from `-Dkernel-stats=true`) and the disassembled device code (`*.s`), plus a
 `_sweep` table from the batch-size sweep.
 
 **[`REPORT.md`](REPORT.md) is the full CPU vs HIP vs CUDA analysis** of these
-runs: where each backend spends its time, why the faster GPU lost the COCO
-end-to-end number, how most of the AMD figures turned out to have been taken
-on a card whose dual-BIOS switch was set to a mining profile, and what
-register-blocking the GEMM was worth once all of that was untangled. It ends
-with future work and the commands for picking it back up.
+runs: where each backend spends its time, why both GPUs reach only 5-8% of
+peak FP32 and what register-blocking the GEMM recovered, and why the faster
+GPU lost the COCO end-to-end comparison to a machine with a better CPU. It
+ends with future work and the commands to pick each item back up.
+
+Two caveats on the recorded results. The RTX 3060 Ti is no longer available,
+so its numbers are a frozen snapshot rather than something that can be
+re-run. And the RX 6650 XT spent the early runs with its physical dual-BIOS
+switch set to a mining profile that capped the shader clock at 45% of rating
+-- the report has that as a self-contained curiosity, and every table in it
+uses the corrected figures.
 
 `results/laptop-cpu.md` is the CPU run described above. Two things in it
 are worth reading carefully rather than at a glance:
@@ -286,9 +292,8 @@ If you want `rocm-smi` anyway as a cross-check, `rocm-smi --showgpuclocks
 ## Giving the GPU a clean run
 
 `gpu-prep.sh` reports, and optionally sets, the conditions an AMD card needs
-to be measured fairly. It exists because a monitored run found the RX 6650 XT
-holding 1193 MHz against a rated 2635 MHz boost -- at 42 W of a 130 W budget
-and 38 C, so not throttling, just never leaving a low clock state.
+to be measured fairly. It exists because a run on a card that looked healthy
+turned out to be held at 45% of its rated clock for a week -- see the report.
 
 ```sh
 ./bench/gpu-prep.sh                  # report only, no root, changes nothing
