@@ -1,0 +1,8 @@
+platform,dataset,device,gemm,classes,batches,train_img_per_s,train_final_loss,infer_img_per_s,infer_e2e_img_per_s,top1,top5,majority_baseline
+cpu,mnist,CPU,cpu,10,1000,992.2,0.0649,3373.2,3277.7,0.9758,0.9996,0.1135
+cpu,cifar10,CPU,cpu,10,1000,382.7,1.1732,1266.0,1233.6,0.5871,0.9523,0.1000
+cpu,coco,CPU,cpu,80,1000,94.4,2.9329,246.6,231.3,0.3445,0.5537,0.3110
+gpu,mnist,AMD Radeon RX 6650 XT,blocked,10,1000,8073.2,0.1419,24929.2,21164.9,0.9769,0.9996,0.1135
+gpu,cifar10,AMD Radeon RX 6650 XT,blocked,10,1000,3620.3,1.4713,9490.3,8906.8,0.5826,0.9553,0.1000
+gpu,coco,AMD Radeon RX 6650 XT,blocked,80,1000,1007.9,3.0838,3784.6,2123.1,0.3495,0.5485,0.3110
+gpu,cifar10-full,AMD Radeon RX 6650 XT,blocked,10,1000,178.6,1.1065,525.7,523.1,0.4921,0.9322,0.1000

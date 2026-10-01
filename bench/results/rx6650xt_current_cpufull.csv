@@ -1,0 +1,2 @@
+platform,dataset,device,gemm,classes,batches,train_img_per_s,train_final_loss,infer_img_per_s,infer_e2e_img_per_s,top1,top5,majority_baseline
+cpu,cifar10-full,CPU,cpu,10,20,13.3,1.9399,87.1,87.0,0.1540,0.5163,0.1000
