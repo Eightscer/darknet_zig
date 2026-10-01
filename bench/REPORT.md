@@ -207,6 +207,40 @@ slowest CPU here, and a GPU speedup is only ever a ratio against whatever it
 was paired with. Comparing the two GPUs to each other removes that, which is
 what the next section does.
 
+### Where it stands now
+
+The tables above are the common baseline. Since then the CPU GEMM was
+register-blocked, the GPU gained a blocked kernel for large shapes, and the
+loader scales with core count. Two machines have been re-measured on that
+build (`results/rx6650xt_current.md`, `results/laptop-cpu-blocked.md`); the
+RTX 3060 Ti could not be.
+
+| | baseline | current | |
+|---|---|---|---|
+| **Ryzen 7 5700G, CPU** | | | |
+| mnist train / infer | 816.0 / 2234.5 | 992.2 / 3373.2 | 1.22x / 1.51x |
+| cifar10 train / infer | 255.9 / 718.1 | 382.7 / 1266.0 | 1.50x / 1.76x |
+| coco train / infer | 71.2 / 184.8 | 94.4 / 246.6 | 1.33x / 1.33x |
+| cifar10-full train / infer | 6.5 / 20.2 | 13.3 / 87.1 | 2.05x / **4.31x** |
+| **Core i7-1185G7, CPU** | | | |
+| mnist train / infer | 465.6 / 1275.1 | 762.5 / 2871.2 | 1.64x / 2.25x |
+| cifar10 train / infer | 94.2 / 230.5 | 200.3 / 974.6 | 2.13x / **4.23x** |
+| coco train / infer | 28.2 / 81.0 | 49.4 / 180.9 | 1.75x / 2.23x |
+| **RX 6650 XT, GPU** | | | |
+| mnist infer | 24933.9 | 24929.2 | 1.00x |
+| cifar10 infer | 9385.3 | 9490.3 | 1.01x |
+| coco infer / e2e | 3758.2 / 1912.3 | 3784.6 / 2123.1 | 1.01x / **1.11x** |
+| cifar10-full infer | 525.4 | 525.7 | 1.00x * |
+
+The CPU gains are the headline. On the GPU the three small networks are
+unchanged, correctly: their GEMMs are too small for the blocked kernel and
+the size gate sends them to the simple one, which is the same code as the
+baseline. COCO's end-to-end gain is the loader, not the kernels.
+
+\* `cifar10-full` should have gained here and did not, because the gate was
+mis-scaled. It is the one row in this table that is wrong, and
+[Design considerations](#design-considerations) explains why.
+
 ## Normalising: achieved GFLOP/s
 
 Converting throughput into arithmetic actually performed -- inference is one
@@ -380,12 +414,15 @@ produced a more useful fact about the kernel:
 | 128 | ~51 MB | 254.4 | 578.0 |
 
 Inference throughput moves by about 1% across an 8x range of batch size that
-straddles the cache boundary. Batch size only changes `N`, the GEMM's column
-count, which scales the number of thread blocks rather than the efficiency of
-any one of them; the per-thread shared-memory traffic that limits this kernel
-is invariant. (These runs predate the BIOS fix described below, so the
-absolute figures are low and the comparison should be repeated at full clock
-before the cache question is considered closed.)
+straddles the cache boundary. Those runs predated the BIOS fix below, so the
+sweep was repeated at full clock once the card was working, and the answer is
+the same: 179.9, 180.4 and 180.1 img/s training at batch 16, 32 and 64
+against 178.6 at 128. Flat on a clock-limited card and flat on a healthy one.
+
+Batch size only changes `N`, the GEMM's column count, which scales the number
+of thread blocks rather than the efficiency of any one of them; the
+per-thread shared-memory traffic that limits this kernel is invariant. The
+cache hypothesis is closed.
 
 What follows from all of this is design item 1: give each thread more than one
 output, so the operand loads are shared. See
@@ -586,24 +623,51 @@ simple kernel on the same binary, switched at run time:
 
 So it is worth roughly 1.4-1.7x on training the large network and loses a
 third of inference throughput on the small one. The kernel produces sixteen
-outputs per thread and therefore launches sixteen times fewer threads; below
-some amount of work there are not enough left to cover the tile-load latency.
-`gpu.gemm` now gates on total multiply-adds, `m * n * k >= 2e9`, on top of
-requiring both `m` and `n` to reach 64.
+outputs per thread and therefore launches a sixteenth of the threads; below
+some size there are not enough thread blocks left to fill the machine.
 
-That threshold is measured rather than derived, and it is fitted to two
-configurations. Per layer at batch 128, `cifar10`'s GEMMs top out at 9.3e8 and
-`cifar10-full`'s substantial ones start at 7.4e9 -- an eightfold gap with
-nothing measured inside it. `$DARKNET_GEMM_BLOCK_MIN` overrides it so the gap
-can be swept without a rebuild, and a third network would be worth more than
-any amount of reasoning about where in it the line belongs.
+**Choosing that size took two attempts, and the first was wrong in an
+instructive way.** The obvious measure is total work, `m * n * k`, and the
+first gate used it at 2e9 -- a figure derived by reading layer dimensions off
+the network definitions, where a convolution's output is
+`out_w * out_h * batch`. But darknet calls the GEMM **once per image**, inside
+the batch loop, so `n` is `out_w * out_h` and nothing is multiplied by batch.
+Every figure behind that threshold was 128x too large, and the effect was to
+disable the blocked kernel everywhere. The `cifar10-full` row in
+[Where it stands now](#where-it-stands-now) is the symptom: a run that
+reports `gemm=blocked` and performs exactly like the simple kernel, because
+no GEMM in the network ever cleared the gate.
+
+A sweep of the threshold found the edge and, more usefully, showed that total
+work is the wrong quantity regardless. Measured per GEMM call:
+
+| layer | m | n | k | m*n*k | 64x64 tiles | blocked kernel |
+|---|---|---|---|---|---|---|
+| cifar10 conv64 | 64 | 196 | 576 | 7.2e6 | 4 | loses |
+| cifar10 FC | 128 | 128 | 6272 | **1.0e8** | 4 | loses |
+| coco FC | 128 | 256 | 9216 | **3.0e8** | 8 | loses |
+| coco conv64 | 64 | 576 | 288 | 1.1e7 | 9 | untested |
+| cifar10-full conv256 | 256 | 196 | 1152 | **5.8e7** | 16 | **wins** |
+| cifar10-full conv128 | 128 | 784 | 1152 | 1.2e8 | 26 | **wins** |
+
+The two fully-connected layers lose at 1.0e8 and 3.0e8 multiply-adds while a
+convolution wins at 5.8e7, so no threshold on work can separate them. Their
+shapes are wide and shallow -- 128x128 and 128x256 outputs, four and eight
+tiles -- and it is the tile count, not the arithmetic, that runs out. The
+gate is now `ceil(m/64) * ceil(n/64) >= 16`, which matches the mechanism and
+separates every case measured.
+
+It is still fitted data rather than theory: known losers sit at 4, 8 and 9
+tiles and known winners at 16 and 26, so 16 is the lowest value observed to
+win, not one shown to be optimal, and the 9-tile case was never tested
+directly. `$DARKNET_GEMM_MIN_TILES` overrides it without a rebuild.
 
 Two pieces of tooling came out of getting this wrong. `src/kernels/verify.sh`
 runs a block's 256 threads as real threads against a `std::barrier` and checks
 the blocked kernel is bit-identical to the simple one; it caught nothing here,
 because the bug was in memory access patterns, which it explicitly cannot see.
 What did catch it was running on a GPU. And every run now records `gemm=` and
-`gemm_block_min_work=`, because the first attempt at this comparison silently
+`gemm_min_tiles=`, because the first attempt at this comparison silently
 measured one kernel twice against a stale binary, and produced four tables
 that agreed to within 0.1% while appearing to say something.
 
@@ -722,14 +786,13 @@ nothing to do with how fast the card was clocked.
 
 ## Threats to validity
 
-- **The tables are a pre-optimisation baseline.** Every number in
-  [Results](#results) predates the GEMM work, because that is the only state
-  all four machines were measured in. The current code is faster on the CPU
-  everywhere and on the GPU for large networks; see
-  [Design considerations](#design-considerations) for by how much, and
-  [Future work](#future-work) for the run that would refresh them.
+- **The main tables are a pre-optimisation baseline**, because that is the
+  only state all four machines were measured in.
+  [Where it stands now](#where-it-stands-now) has the two machines that could
+  be re-measured on the current build.
 - **The NVIDIA column is frozen.** That card is no longer available, so its
-  rows cannot be corrected, extended or reproduced. They are a snapshot.
+  rows cannot be corrected, extended or reproduced. They are a snapshot, and
+  the CUDA backend is now untested against any hardware.
 - **Each GPU had exactly one host CPU**, so "AMD vs NVIDIA end to end" is
   partly "Ryzen vs Xeon". This is why the report leans on same-host speedups
   and the GFLOP/s normalisation rather than raw cross-machine numbers, and it
@@ -741,11 +804,15 @@ nothing to do with how fast the card was clocked.
   session, a browser and an emulator during the main runs. A quiesced repeat
   changed throughput by under 1%, so this did not affect the numbers, but the
   asymmetry is worth knowing.
-- **The batch-size sweep was run on the mining BIOS**, where the card was
-  clock-limited and therefore insensitive to most things. Its conclusion --
-  that this kernel does not care about batch size -- is probably right but
-  was tested under the wrong conditions. See
-  [Future work](#future-work) item 3.
+- **Error bars exist now, and are small.** `cifar10-full` was measured three
+  times on the RX 6650 XT and twice on the RTX 3060 Ti; MNIST and CIFAR-10
+  three times each on the Ryzen CPU. Spreads run 0.3-1.4%, and loss and
+  accuracy reproduce exactly on the deterministic paths. The laptop and Xeon
+  CPUs are still single runs.
+- **The GPU dispatch threshold is fitted to two networks.** Known losers sit
+  at 4, 8 and 9 output tiles and known winners at 16 and 26; the gate is set
+  at 16, the lowest value observed to win. The 9-tile case was never tested
+  directly. See [Design considerations](#design-considerations).
 - **`infer_load_seconds` is sensitive to filesystem cache state.** The
   laptop's CIFAR-10 decode (8741 img/s) is far below the Ryzen's (97087) by
   more than hardware explains; that run read cold from disk. The duplicated
@@ -754,10 +821,6 @@ nothing to do with how fast the card was clocked.
   The COCO decode figures are consistent between each host's CPU and GPU runs
   and are trustworthy; the MNIST and CIFAR-10 ones should not be used as
   decoder benchmarks.
-- **Both GPUs have error bars; the CPUs do not.** `cifar10-full` was measured
-  three times on the RX 6650 XT and twice on the RTX 3060 Ti, agreeing to
-  within 1%, with loss and accuracy reproducing exactly. Every CPU figure is
-  a single run.
 - **Vendor peak FP32 figures are boost-clock marketing numbers**, so the
   percentages of peak are indicative rather than precise.
 
@@ -808,122 +871,84 @@ machine does not relabel them with your machine.
 
 ## Future work
 
-The RTX 3060 Ti is no longer available, so its columns are frozen: they are a
-snapshot of one card in one machine and cannot be extended or re-measured.
-Everything below is an RX 6650 XT or CPU run.
+The RTX 3060 Ti is no longer available, so its columns are frozen. Everything
+below is an RX 6650 XT or CPU run.
 
-### 1. Refresh the tables to the current code
+Four earlier items have been closed: the AMD suite was re-run on the current
+build, the threshold was swept, the batch-size sweep was repeated at full
+clock (still flat -- the cache question is closed), and the CPU now has error
+bars. What came out of the threshold sweep was not a value but a correction:
+the gate was on the wrong quantity, and is now on output tiles rather than
+multiply-adds.
 
-The [Results](#results) tables are the pre-optimisation baseline, because
-that is the only state all four machines were measured in. The laptop CPU
-has since been re-run on the current build
-(`results/laptop-cpu-blocked.md`); the AMD machine has not. One run brings
-it up to date -- register-blocked CPU GEMM, size-gated blocked GPU kernel,
-loader scaled to core count:
+### 1. Re-measure `cifar10-full` on the corrected gate
+
+This is the only outstanding measurement, and it is short. The tile gate
+replaced the mis-scaled work gate, so the blocked kernel should now actually
+be dispatched for `cifar10-full` and for nothing else in the suite:
 
 ```sh
-./bench/benchmark.sh --platforms cpu,gpu --datasets mnist,cifar10,coco \
-    --train-batches 1000 --tag rx6650xt_current
-./bench/benchmark.sh --platforms gpu --datasets cifar10-full \
-    --train-batches 1000 --tag rx6650xt_current --append
-./bench/benchmark.sh --platforms cpu --datasets cifar10-full \
-    --train-batches 20 --tag rx6650xt_current_cpufull
+./bench/benchmark.sh --platforms gpu --datasets cifar10-full,cifar10,coco \
+    --train-batches 1000 --tag rx6650xt_tiles16
 ```
 
-About 75 minutes, most of it the CPU half. Check the `gemm` column afterwards:
-`cifar10-full` should read `blocked` and everything else `simple`, which is
-what the size gate is for. If any row reads `?(stale binary)`, the build did
-not pick up the changes and the run should be discarded.
+Expect `cifar10-full` to move from 178.6 / 525.7 to roughly 256 / 590 -- the
+figures the blocked kernel reached when it was dispatched unconditionally --
+and `cifar10` and `coco` to be unchanged, since none of their GEMMs reaches
+16 tiles. About twenty minutes. If `cifar10-full` does not move, check
+`gemm_min_tiles=16` is in the raw output before looking anywhere else.
 
-### 2. Settle the GPU dispatch threshold
+### 2. Sweep the tile gate over the range that matters
 
-`gpu.gemm` sends work to the register-blocked kernel when `m >= 64`,
-`n >= 64` and `m * n * k >= 2e9`. That last number is measured, not derived,
-and fitted to two configurations: `cifar10`'s per-layer GEMMs top out at 9.3e8
-and lose 0.65-0.92x with the blocked kernel, `cifar10-full`'s substantial ones
-start at 7.4e9 and win 1.12-1.66x. Nothing has been measured in the eightfold
-gap between. `$DARKNET_GEMM_BLOCK_MIN` overrides it at run time:
+The previous sweep covered 1e8 to 1e11 multiply-adds, which in per-call units
+was entirely above the interesting region -- only its lowest point changed
+anything. In tiles the useful range is small enough to cover exhaustively:
 
 ```sh
-for w in 100000000 500000000 2000000000 8000000000 100000000000; do
-    DARKNET_GEMM_BLOCK_MIN=$w ./bench/benchmark.sh --platforms gpu \
-        --datasets coco,cifar10,cifar10-full --train-batches 300 \
-        --tag rx6650xt_thresh_$w
+for t in 4 8 12 16 24 32; do
+    DARKNET_GEMM_MIN_TILES=$t ./bench/benchmark.sh --platforms gpu \
+        --datasets cifar10,coco,cifar10-full --train-batches 300 \
+        --tag rx6650xt_tiles_$t
 done
 ```
 
-The last value is effectively "never blocked" and the first "always", so the
-sweep brackets itself; each table records its own `gemm_block_min_work`. About
-half an hour. COCO is the interesting case -- its GEMMs all sit at 1.4e9,
-just under the current gate, so it is the dataset the threshold is most
-likely to be wrong about.
+Half an hour, and it brackets the gate on both sides: at 4 everything
+blockable is blocked, at 32 almost nothing is. COCO is the case to watch --
+its largest convolution sits at 9 tiles, the one value between a known loser
+and a known winner that has never been tested directly.
 
-Before spending that, confirm the build and switch in thirty seconds:
+### 3. Finish the blocking
 
-```sh
-./zig-out/bin/darknet-zig benchmark bench/data/cifar10/cifar10.data \
-    bench/cfg/cifar10.cfg -gpu 0 -train-batches 2 -infer-images 256 | grep '^gemm'
-DARKNET_GEMM_SIMPLE=1 ./zig-out/bin/darknet-zig benchmark bench/data/cifar10/cifar10.data \
-    bench/cfg/cifar10.cfg -gpu 0 -train-batches 2 -infer-images 256 | grep '^gemm'
-```
+`gemmNT` and `gemmTT` on the CPU still use the original dot-product shape;
+they are the backward-weights path, which is why CPU training gained less
+than CPU inference. On the GPU, an `m`-aware tile -- 32x64 as well as 64x64
+-- would halve the tile count needed and bring shapes like COCO's
+convolutions into range, and below the gate a smaller micro-tile might still
+beat one output per thread.
 
-Expect `gemm=blocked` then `gemm=simple`.
-
-### 3. Repeat the batch-size sweep at full clock
-
-[Throughput barely responds to batch size](#throughput-barely-responds-to-batch-size)
-refuted the Infinity Cache hypothesis, but those runs were taken on the mining
-BIOS with the card at 45% of its clock -- where it was clock-limited and so
-insensitive to almost anything. The conclusion deserves re-testing now that
-memory bandwidth could plausibly be the binding constraint:
-
-```sh
-for b in 16 32 64; do
-    ./bench/benchmark.sh --platforms gpu --datasets cifar10-fullb$b \
-        --train-batches 200 --tag rx6650xt_sweep_fixed --append
-done
-```
-
-Ten minutes. If throughput still does not move, the cache question is closed.
-
-### 4. Finish the blocking
-
-Three pieces were left undone. `gemmNT` and `gemmTT` on the CPU still use the
-original dot-product shape; they are the backward-weights path, which is why
-CPU training gained less than CPU inference. On the GPU an `m`-aware tile --
-32x64 as well as 64x64 -- would let the small first layers use a blocked
-kernel instead of falling back, and below the work threshold a smaller
-micro-tile might still beat one output per thread.
-
-### 5. Fuse the elementwise kernels
+### 4. Fuse the elementwise kernels
 
 Bias, batch-norm scale/shift and activation are separate launches, each
 streaming the whole activation tensor through memory. On the small networks
 these dominate: the RX 6650 XT reaches 125 GFLOP/s on MNIST against 853 on
-`cifar10-full`, and the difference is not the convolutions. Fusing them into
-the convolution epilogue removes several full passes over the largest tensors
-in the network. Now that the GEMM has been addressed this is the obvious next
-lever, and unlike the GEMM work it should help the *small* networks most.
+`cifar10-full`, and the difference is not the convolutions. Now that the GEMM
+has been addressed this is the obvious next lever, and unlike the GEMM work
+it should help the *small* networks most -- which is where this framework
+currently looks worst.
 
-### 6. Error bars
+### 5. Error bars on the remaining CPUs
 
-Both GPUs have them -- `cifar10-full` was measured three times on the RX 6650
-XT (87.4 / 87.5 / 88.1 img/s training on the mining BIOS) and twice on the
-RTX 3060 Ti, putting variance under 1%. The CPU numbers are single runs:
+The Ryzen has three repeats; the laptop and the Xeon are single runs. The
+Xeon can no longer be re-run, so this is a laptop-only item and low value
+given the Ryzen's spread was 1.4%.
 
-```sh
-for i in 1 2 3; do
-    ./bench/benchmark.sh --platforms cpu --datasets mnist,cifar10 \
-        --train-batches 300 --tag rx6650xt_cpu_rep$i
-done
-```
+### 6. What can no longer be done
 
-### 7. What can no longer be done
-
-Breaking the one-GPU-one-CPU confound needed a card swap, and with only one
-GPU left there is nothing to swap. Any future NVIDIA comparison starts over on
+Breaking the one-GPU-one-CPU confound needed a card swap, and with one GPU
+left there is nothing to swap. Any future NVIDIA comparison starts over on
 new hardware; the numbers here should not be carried forward to a different
-card, and the CUDA backend itself is now untested against anything.
+card.
+
 ## Closing notes
 
 ### Where the port ended up
@@ -968,7 +993,7 @@ two performance bugs; both were found by running the thing on the hardware in
 question. The tooling that survives exists because of that: `monitor.sh` for
 clocks, `gpu-prep.sh` for a clean device, `verify.sh` for kernel correctness
 without a GPU, `-Dkernel-stats` for occupancy, and the `gemm=` and
-`gemm_block_min_work=` fields now recorded in every run. Each was expensive to
+`gemm_min_tiles=` fields now recorded in every run. Each was expensive to
 need once and should be cheap the next time.
 
 ### What generalises

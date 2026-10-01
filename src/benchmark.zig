@@ -63,7 +63,7 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !void {
     emit("device", "{s}", .{gpu.deviceName()});
     emit("device_memory_mib", "{d}", .{gpu.deviceMemoryMib()});
     emit("gemm", "{s}", .{gpu.gemmPolicy()});
-    emit("gemm_block_min_work", "{d}", .{gpu.gemmBlockMinWork()});
+    emit("gemm_min_tiles", "{d}", .{gpu.gemmBlockMinTiles()});
     emit("net", "{s}", .{base});
     emit("classes", "{d}", .{classes});
 

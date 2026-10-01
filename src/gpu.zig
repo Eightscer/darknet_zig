@@ -78,20 +78,24 @@ const gemm_block_min: usize = 64;
 /// shapes it was supposed to help.
 var gemm_simple_only: bool = false;
 
-/// Total multiply-adds below which the register-blocked kernel loses to the
-/// simple one, despite issuing a quarter of the shared-memory traffic per
-/// FMA. It produces sixteen outputs per thread rather than one, so it
-/// launches sixteen times fewer threads, and below some amount of work
-/// there are not enough of them left to keep the machine busy through the
-/// tile-load latency.
+/// Minimum number of 64x64 output tiles below which the register-blocked
+/// kernel loses to the simple one, despite issuing a quarter of the
+/// shared-memory traffic per FMA. It computes sixteen outputs per thread and
+/// so launches a sixteenth of the threads; below some number of tiles there
+/// are not enough thread blocks left to fill the machine.
 ///
-/// Measured, not derived. On `cifar10` (m*n*k at most 9.3e8 per layer) the
-/// blocked kernel runs at 0.65-0.92x the simple one on both cards; on
-/// `cifar10-full` (7.4e9 and up) it runs at 1.12-1.66x. Nothing was
-/// measured in between, so this sits in an eightfold gap between two
-/// configurations and should be re-checked against a third.
-/// $DARKNET_GEMM_BLOCK_MIN overrides it, to make sweeping it cheap.
-var gemm_block_min_work: u64 = 2_000_000_000;
+/// Measured, not derived, and the quantity matters: total multiply-adds does
+/// *not* separate the cases. Both fully-connected layers measured here lose
+/// with the blocked kernel at 1.0e8 and 3.0e8 multiply-adds, while a
+/// convolution wins at 5.8e7 -- because the FC shapes are wide and shallow
+/// (128x128 and 128x256 outputs, 4 and 8 tiles) and the convolution is not
+/// (256x196, 16 tiles). Tile count tracks what actually runs out.
+///
+/// Known losers sit at 4, 8 and 9 tiles; known winners at 16 and 26. That is
+/// a narrow gap fitted to two networks, and 16 is the lowest value observed
+/// to win rather than a value shown to be optimal.
+/// $DARKNET_GEMM_MIN_TILES overrides it, to make sweeping it cheap.
+var gemm_block_min_tiles: u64 = 16;
 
 /// Which GEMM kernel a GPU run will use, for the benchmark to record. A run
 /// that does not report this at all was produced by a binary predating the
@@ -102,10 +106,10 @@ pub fn gemmPolicy() []const u8 {
     return if (gemm_simple_only) "simple" else "blocked";
 }
 
-/// The work threshold the blocked kernel is gated on, so a run records not
+/// The tile threshold the blocked kernel is gated on, so a run records not
 /// just which kernels were available but where the line between them sat.
-pub fn gemmBlockMinWork() u64 {
-    return if (active() and !gemm_simple_only) gemm_block_min_work else 0;
+pub fn gemmBlockMinTiles() u64 {
+    return if (active() and !gemm_simple_only) gemm_block_min_tiles else 0;
 }
 
 /// A device-side float array. A null pointer means "this layer doesn't use
@@ -329,8 +333,8 @@ pub fn init(allocator: std.mem.Allocator, index: i32) !void {
     _ = api.memInfo(&free_mem, &total_mem);
     device_total_mib = total_mem >> 20;
     gemm_simple_only = std.c.getenv("DARKNET_GEMM_SIMPLE") != null;
-    if (std.c.getenv("DARKNET_GEMM_BLOCK_MIN")) |v| {
-        gemm_block_min_work = std.fmt.parseInt(u64, std.mem.sliceTo(v, 0), 10) catch gemm_block_min_work;
+    if (std.c.getenv("DARKNET_GEMM_MIN_TILES")) |v| {
+        gemm_block_min_tiles = std.fmt.parseInt(u64, std.mem.sliceTo(v, 0), 10) catch gemm_block_min_tiles;
     }
     if (gemm_simple_only) sys.print("GEMM: register-blocked kernel disabled by $DARKNET_GEMM_SIMPLE\n", .{});
     std.debug.print("{s} device {d}: {s} ({d} MiB free / {d} MiB total)\n", .{
@@ -683,9 +687,10 @@ pub fn gemm(
     // The register-blocked kernel issues 0.5 shared-memory words per
     // multiply-add against the simple kernel's 2.0, but only pays off when
     // both dimensions can fill its wider tile.
-    const work = @as(u64, m) * @as(u64, n) * @as(u64, k);
+    const tile: u64 = gemm_block_tile;
+    const tiles = ((@as(u64, n) + tile - 1) / tile) * ((@as(u64, m) + tile - 1) / tile);
     if (!gemm_simple_only and m >= gemm_block_min and n >= gemm_block_min and
-        work >= gemm_block_min_work)
+        tiles >= gemm_block_min_tiles)
     {
         const bx: u32 = @intCast((n + gemm_block_tile - 1) / gemm_block_tile);
         const by: u32 = @intCast((m + gemm_block_tile - 1) / gemm_block_tile);
