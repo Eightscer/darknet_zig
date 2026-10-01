@@ -1,0 +1,4 @@
+platform,dataset,device,gemm,classes,batches,train_img_per_s,train_final_loss,infer_img_per_s,infer_e2e_img_per_s,top1,top5,majority_baseline
+gpu,cifar10,AMD Radeon RX 6650 XT,blocked,10,300,3767.9,1.4343,9475.4,8909.1,0.5198,0.9389,0.1000
+gpu,coco,AMD Radeon RX 6650 XT,blocked,80,300,1031.7,3.1433,3768.4,2101.7,0.3318,0.5221,0.3110
+gpu,cifar10-full,AMD Radeon RX 6650 XT,blocked,10,300,255.9,1.4276,590.6,587.5,0.3454,0.8974,0.1000
